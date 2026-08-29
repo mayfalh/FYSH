@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && (uid == request.auth.uid || uid == 'fish_user_' + request.auth.uid);
+    }
+
+    // User Profile
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.keys().size() <= 15 &&
+             data.uid is string && data.uid.size() <= 128 &&
+             data.email is string && data.email.size() <= 256;
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || userId == 'fish_user_' + request.auth.uid);
+      allow create: if isSignedIn() && (request.auth.uid == userId || userId == 'fish_user_' + request.auth.uid) && isValidUserProfile(incoming());
+      allow update: if isSignedIn() && (request.auth.uid == userId || userId == 'fish_user_' + request.auth.uid) && isValidUserProfile(incoming());
+      allow delete: if isSignedIn() && (request.auth.uid == userId || userId == 'fish_user_' + request.auth.uid);
+    }
+
+    // Connected Accounts
+    function isValidConnectedAccount(data) {
+      return data.keys().hasAll(['id', 'userId']) &&
+             data.keys().size() <= 15;
+    }
+
+    match /connectedAccounts/{accountId} {
+      allow read: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && isOwner(request.auth.uid);
+      allow create: if isOwner(incoming().userId) && isValidConnectedAccount(incoming());
+      allow update: if isOwner(existing().userId) && isOwner(incoming().userId) && isValidConnectedAccount(incoming());
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // Automations
+    function isValidAutomation(data) {
+      return data.keys().hasAll(['id', 'userId']) &&
+             data.keys().size() <= 15;
+    }
+
+    match /automations/{automationId} {
+      allow read: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && isOwner(request.auth.uid);
+      allow create: if isOwner(incoming().userId) && isValidAutomation(incoming());
+      allow update: if isOwner(existing().userId) && isOwner(incoming().userId) && isValidAutomation(incoming());
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // Agent Sessions
+    function isValidAgentSession(data) {
+      return data.keys().hasAll(['fishUserId', 'composioUserId', 'agentType', 'composioSessionId', 'status', 'createdAt']) &&
+             data.keys().size() <= 15;
+    }
+
+    match /agentSessions/{sessionId} {
+      allow read: if isOwner(resource.data.fishUserId);
+      allow list: if isSignedIn() && isOwner(request.auth.uid);
+      allow create: if isOwner(incoming().fishUserId) && isValidAgentSession(incoming());
+      allow update: if isOwner(existing().fishUserId) && isOwner(incoming().fishUserId) && isValidAgentSession(incoming());
+      allow delete: if isOwner(resource.data.fishUserId);
+    }
+
+    // API Keys Management
+    function isValidApiKey(data) {
+      return data.keys().hasAll(['id', 'name', 'token', 'userId', 'createdAt']) &&
+             data.keys().size() <= 15 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 128 &&
+             data.token is string && data.token.size() <= 256 &&
+             data.userId is string && data.userId.size() <= 128;
+    }
+
+    match /apiKeys/{keyId} {
+      allow read: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && isOwner(request.auth.uid);
+      allow create: if isOwner(incoming().userId) && isValidApiKey(incoming());
+      allow update: if isOwner(existing().userId) && isOwner(incoming().userId) && isValidApiKey(incoming());
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // Default deny for any other collection
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
