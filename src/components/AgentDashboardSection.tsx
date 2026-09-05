@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Bot, 
   Copy, 
@@ -14,6 +14,7 @@ import { Lang } from '../translations';
 import { AgentLogo } from './AgentLogo';
 import { AgentInstallModal } from './AgentInstallModal';
 import { TOP_AGENT_GROUPS, AGENT_LIST, AgentItem } from '../data/agentsData';
+import { fetchFishUserMcpConfig } from '../lib/composioClient';
 
 interface AgentDashboardSectionProps {
   lang: Lang;
@@ -74,15 +75,30 @@ export function AgentDashboardSection({ lang, onNavigateToAgents, onExploreApps 
     setIsInstallModalOpen(true);
   };
 
-  const cliInstallCommand = 'curl -fsSL https://composio.dev/install';
-  const mcpUniversalUrl = 'https://connect.composio.dev/mcp';
+  const cliInstallCommand = 'curl -fsSL https://fysh.online/install';
+  const [mcpUniversalUrl, setMcpUniversalUrl] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}/api/agent/mcp`;
+    }
+    return 'https://fysh.online/api/agent/mcp';
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchFishUserMcpConfig().then((cfg) => {
+      if (isMounted && cfg.url) {
+        setMcpUniversalUrl(cfg.url);
+      }
+    });
+    return () => { isMounted = false; };
+  }, []);
 
   return (
     <div className="w-full my-10 sm:my-14" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
       {/* Title & Primary Action Button */}
       <div className="text-center mb-10 sm:mb-12">
         <h2 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-[#111111] font-sans leading-tight">
-          {lang === 'ar' ? 'أنجز المزيد مع فيش، في كل مكان تعمل فيه.' : 'Do more with Composio, everywhere you work.'}
+          {lang === 'ar' ? 'أنجز المزيد مع فيش، في كل مكان تعمل فيه.' : 'Do more with FYSH, everywhere you work.'}
         </h2>
 
         <div className="mt-5 flex justify-center">
@@ -191,16 +207,16 @@ export function AgentDashboardSection({ lang, onNavigateToAgents, onExploreApps 
 
         </div>
 
-        {/* Right Column: Use Composio via CLI & MCP */}
+        {/* Right Column: Use FYSH via CLI & MCP */}
         <div className="space-y-6 flex flex-col justify-between">
           
-          {/* 1. Use Composio via CLI */}
+          {/* 1. Use FYSH via CLI */}
           <div className="bg-white rounded-xl border border-gray-200 p-5 sm:p-6 shadow-2xs flex-1 flex flex-col justify-between hover:border-gray-300 transition-all">
             <div>
               {/* Header with Title and Corner Agent Icons */}
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-base font-bold text-[#111]">
-                  Use Composio via CLI
+                  {lang === 'ar' ? 'استخدام سطر الأوامر' : 'Use FYSH via CLI'}
                 </h3>
                 {/* Real Mini Agent Logos in Top Right */}
                 <div className="flex items-center gap-1.5">
@@ -255,8 +271,8 @@ export function AgentDashboardSection({ lang, onNavigateToAgents, onExploreApps 
                 <div className="p-3.5 font-mono text-[11px] text-gray-700 space-y-2 overflow-x-auto leading-relaxed">
                   <div>
                     <span className="text-gray-400 select-none">$ </span>
-                    <span className="text-gray-800 font-medium">composio search</span>
-                    <span className="text-gray-600"> "can you report a bug on composiohq/composio"</span>
+                    <span className="text-gray-800 font-medium">fysh search</span>
+                    <span className="text-gray-600"> "can you report a bug on github"</span>
                   </div>
 
                   <div className="text-gray-500 font-medium text-[10px]">
@@ -265,15 +281,15 @@ export function AgentDashboardSection({ lang, onNavigateToAgents, onExploreApps 
 
                   <div>
                     <span className="text-gray-400 select-none">$ </span>
-                    <span className="text-gray-800 font-medium">composio execute GITHUB_CREATE_ISSUE \</span>
+                    <span className="text-gray-800 font-medium">fysh execute GITHUB_CREATE_ISSUE \</span>
                     <div className="pl-3 text-gray-600">
-                      -d '{"{"}"owner":"composiohq","repo":"composio","title":"report"{"}"}'
+                      -d '{"{"}"owner":"fysh-platform","repo":"fysh","title":"report"{"}"}'
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1.5 text-gray-500 text-[10px] pt-1">
                     <span className="text-gray-400 font-bold">*</span>
-                    <span>Composing...</span>
+                    <span>Executing...</span>
                   </div>
                 </div>
               </div>

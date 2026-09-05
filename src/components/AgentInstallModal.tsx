@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Copy, Check, Terminal, FileCode, BookOpen, Sparkles } from 'lucide-react';
 import { AgentItem } from '../data/agentsData';
 import { AgentLogo } from './AgentLogo';
 import { Lang } from '../translations';
+import { fetchFishUserMcpConfig } from '../lib/composioClient';
 
 interface AgentInstallModalProps {
   agent: AgentItem | null;
@@ -14,6 +15,22 @@ interface AgentInstallModalProps {
 export function AgentInstallModal({ agent, isOpen, onClose, lang }: AgentInstallModalProps) {
   const [copiedType, setCopiedType] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'command' | 'config' | 'guide'>('command');
+  const [userMcpUrl, setUserMcpUrl] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}/api/agent/mcp`;
+    }
+    return 'https://fysh.online/api/agent/mcp';
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchFishUserMcpConfig().then((cfg) => {
+      if (isMounted && cfg.url) {
+        setUserMcpUrl(cfg.url);
+      }
+    });
+    return () => { isMounted = false; };
+  }, []);
 
   if (!isOpen || !agent) return null;
 
@@ -23,22 +40,26 @@ export function AgentInstallModal({ agent, isOpen, onClose, lang }: AgentInstall
     setTimeout(() => setCopiedType(null), 2500);
   };
 
-  const formattedMcpConfig = agent.mcpConfig
-    ? JSON.stringify(agent.mcpConfig, null, 2)
-    : JSON.stringify(
-        {
-          mcpServers: {
-            fysh: {
-              command: 'npx',
-              args: ['-y', '@composio/mcp@latest']
-            }
-          }
-        },
-        null,
-        2
-      );
+  // Helper to replace static MCP URLs and sanitize commands
+  const sanitizeText = (text: string) => {
+    return text
+      .replace(/https:\/\/connect\.composio\.dev\/mcp/g, userMcpUrl)
+      .replace(/composio add /g, 'fysh add ')
+      .replace(/@composio\/mcp@latest/g, '@fysh/mcp@latest');
+  };
 
-  const fallbackCommand = agent.command || `composio add ${agent.id}`;
+  const rawConfig = agent.mcpConfig
+    ? agent.mcpConfig
+    : {
+        mcpServers: {
+          fysh: {
+            url: userMcpUrl
+          }
+        }
+      };
+
+  const formattedMcpConfig = sanitizeText(JSON.stringify(rawConfig, null, 2));
+  const fallbackCommand = sanitizeText(agent.command || `fysh add ${agent.id}`);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-fade-in" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
@@ -188,7 +209,7 @@ export function AgentInstallModal({ agent, isOpen, onClose, lang }: AgentInstall
                     <span className="w-5 h-5 rounded-full bg-[#8B0000] text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
                       {idx + 1}
                     </span>
-                    <span className="leading-relaxed">{step}</span>
+                    <span className="leading-relaxed">{sanitizeText(step)}</span>
                   </li>
                 ))}
               </ol>

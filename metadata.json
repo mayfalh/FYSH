@@ -1,6 +1,6 @@
 {
   "name": "FYSH",
-  "description": "Conversational AI platform for modern financial institutions.",
+  "description": "منصة فيش الموحدة لربط وتكامل كافة التطبيقات والخدمات مع الوكلاء الأذكياء عبر واجهة برمجية موحدة.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

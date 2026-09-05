@@ -646,6 +646,7 @@ export function Sections({ lang, onOpenLogin, onExploreApps, onNavigateToAgents 
               loop
               playsInline
               preload="auto"
+              crossOrigin="anonymous"
             >
               <source src="https://res.cloudinary.com/dd3as4ova/video/upload/v1787315279/Saudi_entrepreneur_using_AI_plat__202608210829_t105qs.mp4" type="video/mp4" />
             </video>

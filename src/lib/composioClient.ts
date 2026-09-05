@@ -172,3 +172,24 @@ export async function initiateComposioConnect(
     };
   }
 }
+
+export async function fetchFishUserMcpConfig(fishUserId?: string): Promise<{ url: string; headers: Record<string, string>; fyshMcpUrl?: string }> {
+  const uid = fishUserId || getOrCreateStableFishUserId();
+  try {
+    const res = await fetch(`/api/agent/mcp?userId=${encodeURIComponent(uid)}`);
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        url: data.fyshMcpUrl || data.url || `${window.location.origin}/api/agent/mcp?userId=${encodeURIComponent(uid)}`,
+        headers: data.headers || {},
+        fyshMcpUrl: data.fyshMcpUrl
+      };
+    }
+  } catch (e) {
+    console.warn("Failed to fetch user MCP config:", e);
+  }
+  return {
+    url: typeof window !== 'undefined' ? `${window.location.origin}/api/agent/mcp?userId=${encodeURIComponent(uid)}` : 'https://fysh.online/api/agent/mcp',
+    headers: {}
+  };
+}

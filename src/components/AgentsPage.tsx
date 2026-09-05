@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ArrowLeft, 
   ArrowRight, 
@@ -24,6 +24,7 @@ import { Lang, t } from '../translations';
 import { TOP_AGENT_GROUPS, AGENT_LIST, AgentItem } from '../data/agentsData';
 import { AgentLogo } from './AgentLogo';
 import { AgentInstallModal } from './AgentInstallModal';
+import { fetchFishUserMcpConfig } from '../lib/composioClient';
 
 interface AgentsPageProps {
   lang: Lang;
@@ -126,9 +127,24 @@ export function AgentsPage({
     setIsInstallModalOpen(true);
   };
 
-  const cliInstallCommand = 'curl -fsSL https://composio.dev/install';
-  const mcpUniversalUrl = 'https://connect.composio.dev/mcp';
-  const directDashboardUrl = 'https://dashboard.composio.dev/mayalfalh_workspace/~/connect';
+  const cliInstallCommand = 'curl -fsSL https://fysh.online/install';
+  const [mcpUniversalUrl, setMcpUniversalUrl] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}/api/agent/mcp`;
+    }
+    return 'https://fysh.online/api/agent/mcp';
+  });
+  const directDashboardUrl = '/apps';
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchFishUserMcpConfig().then((cfg) => {
+      if (isMounted && cfg.url) {
+        setMcpUniversalUrl(cfg.url);
+      }
+    });
+    return () => { isMounted = false; };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#FFFFFF] text-[#191919] selection:bg-gray-200" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
@@ -381,10 +397,10 @@ export function AgentsPage({
                 {/* Shell install command box */}
                 <div className="mt-4 bg-[#EEF2FF]/60 p-3 rounded-lg border border-indigo-100 flex items-center justify-between group">
                   <code className="text-xs font-mono text-indigo-900 font-medium truncate select-all">
-                    $ {selectedCliTab === 'unix' ? cliInstallCommand : 'iwr -useb https://composio.dev/install.ps1 | iex'}
+                    $ {selectedCliTab === 'unix' ? cliInstallCommand : 'iwr -useb https://fysh.online/install.ps1 | iex'}
                   </code>
                   <button
-                    onClick={() => handleCopy(selectedCliTab === 'unix' ? cliInstallCommand : 'iwr -useb https://composio.dev/install.ps1 | iex', 'cli_cmd')}
+                    onClick={() => handleCopy(selectedCliTab === 'unix' ? cliInstallCommand : 'iwr -useb https://fysh.online/install.ps1 | iex', 'cli_cmd')}
                     className="p-1 text-indigo-600 hover:text-indigo-900 rounded transition-colors shrink-0 cursor-pointer"
                     title="Copy installation command"
                   >
@@ -409,8 +425,8 @@ export function AgentsPage({
                   <div className="p-3.5 font-mono text-[11px] text-gray-700 space-y-2 overflow-x-auto leading-relaxed">
                     <div>
                       <span className="text-gray-400 select-none">$ </span>
-                      <span className="text-gray-800 font-medium">composio search</span>
-                      <span className="text-gray-600"> "can you report a bug on composiohq/composio"</span>
+                      <span className="text-gray-800 font-medium">fysh search</span>
+                      <span className="text-gray-600"> "can you report a bug on github"</span>
                     </div>
 
                     <div className="text-gray-500 font-medium text-[10px]">
@@ -419,15 +435,15 @@ export function AgentsPage({
 
                     <div>
                       <span className="text-gray-400 select-none">$ </span>
-                      <span className="text-gray-800 font-medium">composio execute GITHUB_CREATE_ISSUE \</span>
+                      <span className="text-gray-800 font-medium">fysh execute GITHUB_CREATE_ISSUE \</span>
                       <div className="pl-3 text-gray-600">
-                        -d '{"{"}"owner":"composiohq","repo":"composio","title":"report"{"}"}'
+                        -d '{"{"}"owner":"fysh-platform","repo":"fysh","title":"report"{"}"}'
                       </div>
                     </div>
 
                     <div className="flex items-center gap-1.5 text-gray-500 text-[10px] pt-1">
                       <span className="text-gray-400 font-bold">*</span>
-                      <span>Composing...</span>
+                      <span>Executing...</span>
                     </div>
                   </div>
                 </div>
@@ -718,21 +734,22 @@ export function AgentsPage({
               <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between">
                 <div>
                   <h4 className="text-xs font-bold text-gray-900">
-                    {lang === 'ar' ? 'لوحة تحكم مساحة العمل المباشرة' : 'Direct Composio Workspace Dashboard'}
+                    {lang === 'ar' ? 'إدارة التطبيقات المتصلة' : 'Connected Applications'}
                   </h4>
                   <p className="text-[11px] text-gray-500 mt-0.5">
-                    https://dashboard.composio.dev/mayalfalh_workspace/~/connect
+                    https://fysh.online/apps
                   </p>
                 </div>
-                <a
-                  href={directDashboardUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={() => {
+                    setIsQuickConnectOpen(false);
+                    if (onNavigateToApps) onNavigateToApps();
+                  }}
                   className="px-3 py-1.5 bg-[#2563EB] text-white text-xs font-semibold rounded-lg hover:bg-[#1D4ED8] transition-colors flex items-center gap-1 shrink-0 cursor-pointer"
                 >
                   <span>{lang === 'ar' ? 'فتح' : 'Open'}</span>
                   <ExternalLink className="w-3 h-3" />
-                </a>
+                </button>
               </div>
             </div>
 
@@ -767,15 +784,15 @@ export function AgentsPage({
 
             <div className="mt-4 bg-gray-50 p-4 rounded-xl border border-gray-200 font-mono text-xs text-gray-800 overflow-x-auto max-h-96">
               <pre>{`#!/usr/bin/env bash
-# FYSH + Composio Official CLI Installer
+# FYSH Official CLI Installer
 set -e
 
-echo "Downloading CLI tool..."
-curl -fsSL https://github.com/ComposioHQ/composio/releases/latest/download/composio-linux-amd64 -o /usr/local/bin/composio
-chmod +x /usr/local/bin/composio
+echo "Downloading FYSH Agent CLI..."
+curl -fsSL https://fysh.online/install -o /usr/local/bin/fysh
+chmod +x /usr/local/bin/fysh
 
-echo "CLI installed successfully!"
-echo "Run 'composio init' to authenticate with FYSH workspace."`}</pre>
+echo "FYSH CLI installed successfully!"
+echo "Run 'fysh init' to authenticate with your FYSH account."`}</pre>
             </div>
 
             <div className="mt-5 flex justify-end gap-2">

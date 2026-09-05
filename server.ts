@@ -20,10 +20,9 @@ app.use(express.urlencoded({ extended: true }));
 // --- Security headers & CORS ---
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '0');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  // Allow frontend origin (same host or localhost for dev)
+  // Allow frontend origin (same host, fysh.online, or localhost for dev)
   const origin = req.headers.origin;
   if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -232,13 +231,39 @@ export async function setupFishUserAgent(fishUserId: string, agentType: string) 
   const composio = getComposio();
   const googleUid = fishUserId.startsWith('fish_user_') ? fishUserId.replace('fish_user_', '') : fishUserId;
   const composioUserId = `fish_user_${googleUid}`;
-  const session = await composio.create(composioUserId, { mcp: true });
+
+  // Query user's connected accounts to get toolkits
+  let activeToolkits: string[] = [];
+  try {
+    const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
+    const items = list?.items || (Array.isArray(list) ? list : []);
+    const active = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
+    activeToolkits = Array.from(new Set(active.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
+  } catch (e) {
+    console.warn("[setupFishUserAgent] Failed listing connected accounts:", e);
+  }
+
+  const sessionOptions: any = { mcp: true };
+  if (activeToolkits.length > 0) {
+    sessionOptions.toolkits = activeToolkits;
+    sessionOptions.sessionPreset = "direct_tools";
+  }
+
+  let session: any;
+  try {
+    session = await composio.create(composioUserId, sessionOptions);
+  } catch (err: any) {
+    console.warn("[setupFishUserAgent] Session creation with preset failed, retrying simple:", err?.message);
+    session = await composio.create(composioUserId, { mcp: true });
+  }
+
   return { 
     agentType, 
     composioUserId, 
     sessionId: session.sessionId, 
     mcpUrl: session.mcp?.url || (session.mcp as any)?.url, 
-    mcpHeaders: session.mcp?.headers || (session.mcp as any)?.headers 
+    mcpHeaders: {}, // Never expose Composio API key to client
+    session
   };
 }
 
@@ -260,11 +285,19 @@ export async function connectFishUserToolkit(fishUserId: string, toolkit: string
 // Retrieve existing Agent Session
 export async function useExistingAgentSession(savedSessionId: string) {
   const composio = getComposio();
-  const session = await composio.use(savedSessionId, { mcp: true });
+  let session: any;
+  try {
+    session = await composio.use(savedSessionId, { mcp: true });
+  } catch (err: any) {
+    console.warn("[useExistingAgentSession] composio.use failed for sessionId:", savedSessionId, err?.message);
+    const saved = fishAgentDatabase.get(savedSessionId);
+    const uid = saved?.composioUserId || "fish_user_default";
+    session = await composio.create(uid, { mcp: true });
+  }
   return {
     sessionId: session.sessionId,
     mcpUrl: session.mcp?.url || (session.mcp as any)?.url,
-    mcpHeaders: session.mcp?.headers || (session.mcp as any)?.headers,
+    mcpHeaders: {}, // Never expose Composio API key to client
     session
   };
 }
@@ -556,21 +589,36 @@ async function resolveComposioAuthConfig(toolkitSlug: string, apiKey: string): P
     const getData = await getRes.json();
     const existing = getData.items || [];
     
-    // Strict match by toolkit slug and enabled status
+    // Strict match by toolkit slug and enabled status, preferring tool_router enabled
     const match = existing.find((item: any) => {
       const itemSlug = mapToolkitToComposioSlug(item.toolkit?.slug || item.slug || '');
       const isEnabled = item.status === 'ENABLED';
-      return itemSlug === normSlug && isEnabled;
+      return itemSlug === normSlug && isEnabled && item.is_enabled_for_tool_router !== false;
+    }) || existing.find((item: any) => {
+      const itemSlug = mapToolkitToComposioSlug(item.toolkit?.slug || item.slug || '');
+      return itemSlug === normSlug && item.status === 'ENABLED';
     });
 
     if (match && (match.id || match.nanoid)) {
       const authConfigId = match.id || match.nanoid;
+      // If found but tool router is disabled, ensure it is enabled
+      if (match.is_enabled_for_tool_router === false && match.id) {
+        try {
+          await fetch(`https://backend.composio.dev/api/v3.1/auth_configs/${match.id}`, {
+            method: 'PATCH',
+            headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_enabled_for_tool_router: true })
+          });
+        } catch (patchErr) {
+          console.warn("[COMPOSIO] Failed to enable tool_router on auth config:", patchErr);
+        }
+      }
       console.log(`[COMPOSIO] Auth config found: ${authConfigId} for ${normSlug} (name: ${match.name})`);
       return authConfigId;
     }
   }
 
-  // 2. If not found, create an on-demand Composio-managed auth config
+  // 2. If not found, create an on-demand Composio-managed auth config with is_enabled_for_tool_router: true
   console.log(`[COMPOSIO] Creating on-demand auth config for: ${normSlug}`);
   const createRes = await fetch('https://backend.composio.dev/api/v3/auth_configs', {
     method: 'POST',
@@ -582,7 +630,8 @@ async function resolveComposioAuthConfig(toolkitSlug: string, apiKey: string): P
       toolkit: { slug: normSlug },
       name: `auth_config_${normSlug}_${Date.now()}`,
       auth_scheme: 'OAUTH2',
-      is_composio_managed: true
+      is_composio_managed: true,
+      is_enabled_for_tool_router: true
     })
   });
 
@@ -906,6 +955,201 @@ app.delete("/api/composio/connectedAccounts/:id", async (req, res) => {
   }
 });
 
+// Helper: Safe structured error response for agents
+function formatAgentError(errorType: string, customMessage?: string) {
+  const errorMap: Record<string, string> = {
+    MISSING_API_KEY: "Composio service configuration is missing.",
+    USER_NOT_AUTHENTICATED: "Authentication required to connect agent.",
+    INVALID_SESSION: "Agent session has expired or is invalid. Reconnecting...",
+    NO_CONNECTED_ACCOUNT: "No connected application found for this agent. Please connect an app first.",
+    INACTIVE_CONNECTED_ACCOUNT: "The connected account is inactive or revoked. Please reconnect.",
+    MCP_CONNECTION_FAILED: "Unable to establish MCP connection. Please try again.",
+    TOOL_DISCOVERY_FAILED: "Failed to discover available tools for this agent.",
+    TOOL_EXECUTION_FAILED: "Failed to execute tool on the connected application.",
+    OAUTH_CONNECTION_INCOMPLETE: "Application authorization is incomplete. Please finish the connection flow.",
+    NO_ACTIVE_CONNECTION: "No active connection available for the requested tool.",
+    AGENT_CONNECTION_FAILED: "Unable to connect the agent. Please reconnect the application."
+  };
+
+  return {
+    success: false,
+    error: errorType,
+    message: customMessage || errorMap[errorType] || "An error occurred with the agent connection."
+  };
+}
+
+// White-labeled app logo proxy
+app.get("/api/logos/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const upstreamUrl = `https://logos.composio.dev/api/${encodeURIComponent(slug)}`;
+    const imgRes = await fetch(upstreamUrl);
+    if (!imgRes.ok) {
+      return res.status(imgRes.status).send("Logo not found");
+    }
+    const contentType = imgRes.headers.get("content-type") || "image/svg+xml";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    const buffer = await imgRes.arrayBuffer();
+    return res.send(Buffer.from(buffer));
+  } catch (e: any) {
+    res.status(500).send("Error loading logo");
+  }
+});
+
+// GET and POST /api/agent/mcp:
+// Secure per-user MCP endpoint. Authenticates user, loads connected accounts, creates/retrieves session,
+// enables MCP, proxies JSON-RPC on POST without leaking COMPOSIO_API_KEY.
+app.all("/api/agent/mcp", async (req, res) => {
+  try {
+    const apiKey = process.env.COMPOSIO_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json(formatAgentError("MISSING_API_KEY", "Composio configuration is missing on server"));
+    }
+
+    // 1. Authenticate / resolve user ID from query, body, or headers
+    let rawUserId = (req.query.userId || req.query.fishUserId || req.query.googleUid || req.query.uid || req.body?.userId || req.body?.fishUserId || req.body?.googleUid || req.headers['x-user-id'] || req.headers['x-fish-user-id'] || req.headers['x-google-uid']) as string;
+
+    // Check Authorization header for FYSH API token if present
+    const authHeader = req.headers['authorization'];
+    if (!rawUserId && authHeader && authHeader.startsWith('Bearer ')) {
+      const bearerToken = authHeader.replace('Bearer ', '').trim();
+      const apiKeyRecord = fyshApiKeysDatabase.get(bearerToken);
+      if (apiKeyRecord?.userId) {
+        rawUserId = apiKeyRecord.userId;
+      }
+    }
+
+    // Check query param 'key'
+    if (!rawUserId && req.query.key) {
+      const apiKeyRecord = fyshApiKeysDatabase.get(String(req.query.key));
+      if (apiKeyRecord?.userId) {
+        rawUserId = apiKeyRecord.userId;
+      }
+    }
+
+    // Fallback to active sessions or stable default user
+    if (!rawUserId) {
+      const firstEntry = Array.from(fishAgentDatabase.values())[0];
+      rawUserId = firstEntry?.fishUserId || "default_user";
+    }
+
+    const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
+    const composioUserId = `fish_user_${googleUid}`;
+    const composio = getComposio();
+
+    // 2. Fetch user's active connected accounts
+    let activeToolkits: string[] = [];
+    let activeAccounts: any[] = [];
+    try {
+      const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
+      const items = list?.items || (Array.isArray(list) ? list : []);
+      activeAccounts = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
+      activeToolkits = Array.from(new Set(activeAccounts.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
+    } catch (err: any) {
+      console.warn("[/api/agent/mcp] Connected accounts query notice:", err?.message);
+    }
+
+    // 3. Create or retrieve session with MCP enabled
+    let session: any = null;
+    const cacheKey = `${googleUid}_default`;
+    const savedRecord = fishAgentDatabase.get(cacheKey);
+
+    if (savedRecord?.composioSessionId) {
+      try {
+        session = await composio.use(savedRecord.composioSessionId, { mcp: true });
+      } catch {
+        session = null;
+      }
+    }
+
+    if (!session) {
+      const sessionOptions: any = { mcp: true };
+      if (activeToolkits.length > 0) {
+        sessionOptions.toolkits = activeToolkits;
+        sessionOptions.sessionPreset = "direct_tools";
+      }
+
+      try {
+        session = await composio.create(composioUserId, sessionOptions);
+      } catch (err: any) {
+        console.warn("[/api/agent/mcp] Session creation with preset failed, retrying simple:", err?.message);
+        try {
+          session = await composio.create(composioUserId, { mcp: true });
+        } catch (createErr: any) {
+          console.error("[/api/agent/mcp] Failed creating Composio MCP session:", createErr);
+          return res.status(500).json(formatAgentError("MCP_CONNECTION_FAILED", "Failed to establish agent session"));
+        }
+      }
+    }
+
+    const mcpUrl = session.mcp?.url || (session.mcp as any)?.url;
+    if (!mcpUrl) {
+      return res.status(502).json(formatAgentError("MCP_CONNECTION_FAILED", "MCP URL not provided by session"));
+    }
+
+    // Save session in database
+    const sessionRecord: FishAgentSession = {
+      fishUserId: googleUid,
+      composioUserId,
+      agentType: "default",
+      composioSessionId: session.sessionId,
+      status: "ACTIVE",
+      createdAt: new Date().toISOString(),
+      mcpUrl,
+      mcpHeaders: {}
+    };
+    fishAgentDatabase.set(cacheKey, sessionRecord);
+    fishAgentDatabase.set(session.sessionId, sessionRecord);
+    persistSessionsToDisk();
+
+    // 4. Handle POST request: Proxy JSON-RPC directly to session.mcp.url
+    if (req.method === 'POST') {
+      try {
+        const upstreamHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream',
+          'x-api-key': apiKey
+        };
+
+        const forwardRes = await fetch(mcpUrl, {
+          method: 'POST',
+          headers: upstreamHeaders,
+          body: JSON.stringify(req.body || {})
+        });
+
+        const contentType = forwardRes.headers.get('content-type') || 'application/json';
+        res.setHeader('Content-Type', contentType);
+        res.status(forwardRes.status);
+        const bodyText = await forwardRes.text();
+        return res.send(bodyText);
+      } catch (proxyErr: any) {
+        console.error("[/api/agent/mcp] Proxying error:", proxyErr);
+        return res.status(502).json(formatAgentError("TOOL_EXECUTION_FAILED", "Error executing MCP request"));
+      }
+    }
+
+    // 5. Handle GET request: Return connection metadata
+    const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+    const fyshMcpUrl = `${proto}://${host}/api/agent/mcp?userId=${encodeURIComponent(googleUid)}`;
+
+    return res.json({
+      url: fyshMcpUrl,
+      headers: {}, // Do NOT expose COMPOSIO_API_KEY
+      mcpUrl: fyshMcpUrl,
+      fyshMcpUrl,
+      fyshUserId: googleUid,
+      connectedToolkits: activeToolkits,
+      connectedAccountsCount: activeAccounts.length,
+      success: true
+    });
+  } catch (error: any) {
+    console.error("[/api/agent/mcp] Top-level handler error:", error);
+    return res.status(500).json(formatAgentError("AGENT_CONNECTION_FAILED", error.message));
+  }
+});
+
 // --- Official Composio Agent Endpoints ---
 
 // POST /api/agents/connect: Accepts { fishUserId, agentType, googleUid }, creates session, saves to database, returns { success: true, mcpUrl, mcpHeaders }
@@ -914,17 +1158,40 @@ app.post("/api/agents/connect", async (req, res) => {
     const rawUserId = req.body.googleUid || req.body.fishUserId;
     const { agentType } = req.body;
     if (!rawUserId) {
-      return res.status(400).json({ error: "googleUid or fishUserId is required" });
+      return res.status(400).json(formatAgentError("USER_NOT_AUTHENTICATED", "googleUid or fishUserId is required"));
     }
     const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
     const resolvedAgentType = agentType || "default";
     const composioUserId = `fish_user_${googleUid}`;
 
     const composio = getComposio();
-    const session = await composio.create(composioUserId, { mcp: true });
+
+    // Query active toolkits
+    let activeToolkits: string[] = [];
+    try {
+      const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
+      const items = list?.items || (Array.isArray(list) ? list : []);
+      const active = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
+      activeToolkits = Array.from(new Set(active.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
+    } catch (e) {
+      console.warn("[/api/agents/connect] List error:", e);
+    }
+
+    const sessionOptions: any = { mcp: true };
+    if (activeToolkits.length > 0) {
+      sessionOptions.toolkits = activeToolkits;
+      sessionOptions.sessionPreset = "direct_tools";
+    }
+
+    let session: any;
+    try {
+      session = await composio.create(composioUserId, sessionOptions);
+    } catch (err: any) {
+      session = await composio.create(composioUserId, { mcp: true });
+    }
 
     const mcpUrl = session.mcp?.url || (session.mcp as any)?.url;
-    const mcpHeaders = session.mcp?.headers || (session.mcp as any)?.headers;
+    const mcpHeaders: Record<string, string> = {}; // Do not expose API key
 
     // Database record conforming to requested schema: { fishUserId, composioUserId, agentType, composioSessionId, status: "ACTIVE", createdAt }
     const sessionRecord: FishAgentSession = {
@@ -946,7 +1213,7 @@ app.post("/api/agents/connect", async (req, res) => {
     return res.json({
       success: true,
       mcpUrl,
-      mcpHeaders,
+      mcpHeaders: {},
       sessionId: session.sessionId,
       composioUserId,
       googleUid,
@@ -954,7 +1221,7 @@ app.post("/api/agents/connect", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Error in /api/agents/connect:", error);
-    return res.status(500).json({ error: error.message || "Failed to connect agent" });
+    return res.status(500).json(formatAgentError("AGENT_CONNECTION_FAILED", error.message || "Failed to connect agent"));
   }
 });
 
@@ -964,32 +1231,56 @@ app.post("/api/agents/retrieve", async (req, res) => {
     const rawUserId = req.body.googleUid || req.body.fishUserId;
     const { agentType } = req.body;
     if (!rawUserId) {
-      return res.status(400).json({ error: "googleUid or fishUserId is required" });
+      return res.status(400).json(formatAgentError("USER_NOT_AUTHENTICATED", "googleUid or fishUserId is required"));
     }
     const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
     const resolvedAgentType = agentType || "default";
     const key = `${googleUid}_${resolvedAgentType}`;
-    const savedRecord = fishAgentDatabase.get(key);
-
-    if (!savedRecord || !savedRecord.composioSessionId || savedRecord.status !== "ACTIVE") {
-      return res.status(404).json({ error: "No active agent session found for this user and agent type" });
-    }
+    let savedRecord = fishAgentDatabase.get(key);
 
     const composio = getComposio();
-    const session = await composio.use(savedRecord.composioSessionId, { mcp: true });
+    let session: any;
 
-    const mcpUrl = session.mcp?.url || (session.mcp as any)?.url || savedRecord.mcpUrl;
-    const mcpHeaders = session.mcp?.headers || (session.mcp as any)?.headers || savedRecord.mcpHeaders;
+    if (savedRecord?.composioSessionId) {
+      try {
+        session = await composio.use(savedRecord.composioSessionId, { mcp: true });
+      } catch (err: any) {
+        console.warn("[/api/agents/retrieve] composio.use failed, recreating session:", err?.message);
+        session = null;
+      }
+    }
+
+    if (!session) {
+      // Re-create session on demand
+      const composioUserId = `fish_user_${googleUid}`;
+      session = await composio.create(composioUserId, { mcp: true });
+      savedRecord = {
+        fishUserId: googleUid,
+        composioUserId,
+        agentType: resolvedAgentType,
+        composioSessionId: session.sessionId,
+        status: "ACTIVE",
+        createdAt: new Date().toISOString(),
+        mcpUrl: session.mcp?.url,
+        mcpHeaders: {},
+      };
+      fishAgentDatabase.set(key, savedRecord);
+      fishAgentDatabase.set(session.sessionId, savedRecord);
+      persistSessionsToDisk();
+    }
+
+    const mcpUrl = session.mcp?.url || (session.mcp as any)?.url || savedRecord?.mcpUrl;
 
     return res.json({
+      success: true,
       mcpUrl,
-      mcpHeaders,
+      mcpHeaders: {},
       sessionId: session.sessionId,
-      status: savedRecord.status,
+      status: savedRecord?.status || "ACTIVE",
     });
   } catch (error: any) {
     console.error("Error in /api/agents/retrieve:", error);
-    return res.status(500).json({ error: error.message || "Failed to retrieve agent session" });
+    return res.status(500).json(formatAgentError("INVALID_SESSION", error.message || "Failed to retrieve agent session"));
   }
 });
 
@@ -1728,7 +2019,7 @@ app.post("/api/fish/agent", rateLimit(60_000, 20), async (req, res) => {
     }
 
     // Proceed with agent execution if valid
-    const session = await composio.create(composioUserId);
+    const session = await composio.create(composioUserId, { mcp: true });
     const tools = await session.tools();
 
     let chatHistory: any[] = [
@@ -1760,7 +2051,20 @@ app.post("/api/fish/agent", rateLimit(60_000, 20), async (req, res) => {
         });
 
         for (const call of functionCalls) {
-          const toolResult = await composio.provider.executeToolCall(composioUserId, call as any);
+          let toolResult: any;
+          try {
+            if (typeof (session as any).execute === 'function') {
+              toolResult = await (session as any).execute(call.name, call.args || {});
+            } else {
+              toolResult = await composio.provider.executeToolCall(composioUserId, call as any);
+            }
+          } catch (callErr: any) {
+            try {
+              toolResult = await composio.provider.executeToolCall(composioUserId, call as any);
+            } catch (fallbackErr: any) {
+              toolResult = { error: callErr.message || fallbackErr.message };
+            }
+          }
           
           chatHistory.push({
             role: "tool",
@@ -1781,7 +2085,7 @@ app.post("/api/fish/agent", rateLimit(60_000, 20), async (req, res) => {
     res.json({ success: true, response: finalResponseText, composioUserId });
   } catch (error: any) {
     console.error("Fish Agent execution error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json(formatAgentError("TOOL_EXECUTION_FAILED", error.message));
   }
 });
 

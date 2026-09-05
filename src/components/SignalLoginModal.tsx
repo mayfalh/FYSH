@@ -314,7 +314,7 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
           <div ref={stageRef} className="absolute inset-0 overflow-hidden bg-[#fefefe]">
             {/* Photo / Video Column */}
             <section ref={photoRef} className="absolute left-0 top-0 h-full w-[57.1038%] overflow-hidden bg-[#111]">
-              <video className="absolute inset-0 w-full h-full object-cover object-[100%_50%] block" autoPlay muted loop playsInline preload="auto">
+              <video className="absolute inset-0 w-full h-full object-cover object-[100%_50%] block" autoPlay muted loop playsInline preload="auto" crossOrigin="anonymous">
                 <source src="https://res.cloudinary.com/dd3as4ova/video/upload/v1787375509/Applications_emerging_from_FYSH___202608211518_r3xeec.mp4" type="video/mp4" />
               </video>
               <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/40 scrim-overlay hidden"></div>

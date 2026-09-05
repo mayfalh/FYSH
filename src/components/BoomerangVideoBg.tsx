@@ -16,6 +16,7 @@ export function BoomerangVideoBg() {
         muted
         playsInline
         preload="auto"
+        crossOrigin="anonymous"
         className="w-full h-full object-cover object-center"
       />
 
