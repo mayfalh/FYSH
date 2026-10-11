@@ -8,6 +8,7 @@ import { AppsPage } from './components/AppsPage';
 import { AgentsPage } from './components/AgentsPage';
 import { ApiKeysPage } from './components/ApiKeysPage';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
+import { ScrollToTopButton } from './components/ScrollToTopButton';
 import { FeatureItem } from './types';
 import { Lang } from './translations';
 
@@ -163,6 +164,7 @@ export default function App() {
             if (route === 'api-keys') handleNavigateToApiKeys();
           }}
         />
+        <ScrollToTopButton lang={lang} />
       </>
     );
   }
@@ -198,6 +200,7 @@ export default function App() {
             if (route === 'api-keys') handleNavigateToApiKeys();
           }}
         />
+        <ScrollToTopButton lang={lang} />
       </>
     );
   }
@@ -233,6 +236,7 @@ export default function App() {
             if (route === 'api-keys') handleNavigateToApiKeys();
           }}
         />
+        <ScrollToTopButton lang={lang} />
       </>
     );
   }
@@ -293,6 +297,9 @@ export default function App() {
           if (route === 'apps') handleExploreApps();
         }}
       />
+
+      {/* Floating Action Button: Scroll to top after hero section */}
+      <ScrollToTopButton lang={lang} />
     </div>
   );
 }

@@ -94,6 +94,34 @@ export function Sections({ lang, onOpenLogin, onExploreApps, onNavigateToAgents 
     };
   }, [lang]);
 
+  useEffect(() => {
+    const fitWatermark = () => {
+      const svg = document.getElementById('watermarkSvg');
+      const text = document.getElementById('watermarkText') as unknown as SVGGraphicsElement | null;
+      if (!svg || !text) return;
+      try {
+        const bbox = text.getBBox();
+        svg.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`);
+      } catch (e) {
+        // SVG bbox may not be available until rendered
+      }
+    };
+
+    if (typeof document !== 'undefined' && document.fonts && (document.fonts as any).ready) {
+      (document.fonts as any).ready.then(fitWatermark);
+    } else {
+      window.addEventListener('load', fitWatermark);
+    }
+    window.addEventListener('resize', fitWatermark);
+    const timer = setTimeout(fitWatermark, 100);
+
+    return () => {
+      window.removeEventListener('resize', fitWatermark);
+      window.removeEventListener('load', fitWatermark);
+      clearTimeout(timer);
+    };
+  }, []);
+
   const fetchConnectedAccounts = async () => {
     try {
       const fishUserId = await getOrCreateStableFishUserId();
@@ -782,26 +810,6 @@ export function Sections({ lang, onOpenLogin, onExploreApps, onNavigateToAgents 
             <text id="watermarkText" x="500" y="240" textAnchor="middle" fontSize="320">FYSH</text>
           </svg>
         </div>
-
-        <script dangerouslySetInnerHTML={{__html: `
-          function fitWatermark() {
-            const svg = document.getElementById('watermarkSvg');
-            const text = document.getElementById('watermarkText');
-            if (!svg || !text) return;
-            try {
-              const bbox = text.getBBox();
-              svg.setAttribute('viewBox',
-                 \`\${bbox.x} \${bbox.y} \${bbox.width} \${bbox.height}\`);
-            } catch (e) {}
-          }
-          if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(fitWatermark);
-          } else {
-            window.addEventListener('load', fitWatermark);
-          }
-          window.addEventListener('resize', fitWatermark);
-          setTimeout(fitWatermark, 100);
-        `}} />
       </section>
     </div>
   );

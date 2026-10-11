@@ -419,7 +419,9 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
       });
 
       if (!res.ok) {
-        console.warn(`[COMPOSIO ERROR] Failed to fetch toolkits page ${page}, status: ${res.status}`);
+        if (res.status !== 401 && res.status !== 403) {
+          console.warn(`[COMPOSIO] Failed to fetch toolkits page ${page}, status: ${res.status}`);
+        }
         break;
       }
 
@@ -460,7 +462,9 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
       return allToolkits;
     }
   } catch (err: any) {
-    console.error("[COMPOSIO ERROR] Error fetching catalog:", err.message);
+    if (!err?.message?.includes('401') && !err?.message?.includes('Invalid API key')) {
+      console.warn("[COMPOSIO] Error fetching catalog:", err.message);
+    }
   }
 
   return POPULAR_TOOLKITS;
@@ -539,7 +543,9 @@ app.get("/api/composio/connectedAccounts", async (req, res) => {
     });
 
     if (!response.ok) {
-      console.warn(`[COMPOSIO ERROR] Connected accounts fetch returned status ${response.status}`);
+      if (response.status !== 401 && response.status !== 403) {
+        console.warn(`[COMPOSIO] Connected accounts fetch returned status ${response.status}`);
+      }
       return res.json({ accounts: [] });
     }
 
@@ -570,7 +576,9 @@ app.get("/api/composio/connectedAccounts", async (req, res) => {
 
     res.json({ accounts });
   } catch (error: any) {
-    console.error("[COMPOSIO ERROR] Failed to list connected accounts:", error.message);
+    if (!error?.message?.includes('401') && !error?.message?.includes('Invalid API key')) {
+      console.warn("[COMPOSIO] Failed to list connected accounts:", error.message);
+    }
     res.json({ accounts: [] });
   }
 });
@@ -959,6 +967,7 @@ app.delete("/api/composio/connectedAccounts/:id", async (req, res) => {
 function formatAgentError(errorType: string, customMessage?: string) {
   const errorMap: Record<string, string> = {
     MISSING_API_KEY: "Composio service configuration is missing.",
+    INVALID_API_KEY: "Composio service configuration is invalid or unauthorized.",
     USER_NOT_AUTHENTICATED: "Authentication required to connect agent.",
     INVALID_SESSION: "Agent session has expired or is invalid. Reconnecting...",
     NO_CONNECTED_ACCOUNT: "No connected application found for this agent. Please connect an app first.",
@@ -1036,21 +1045,42 @@ app.all("/api/agent/mcp", async (req, res) => {
 
     const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
     const composioUserId = `fish_user_${googleUid}`;
-    const composio = getComposio();
 
     // 2. Fetch user's active connected accounts
     let activeToolkits: string[] = [];
     let activeAccounts: any[] = [];
     try {
+      const composio = getComposio();
       const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
       const items = list?.items || (Array.isArray(list) ? list : []);
       activeAccounts = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
       activeToolkits = Array.from(new Set(activeAccounts.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
     } catch (err: any) {
-      console.warn("[/api/agent/mcp] Connected accounts query notice:", err?.message);
+      if (!err?.message?.includes('401') && !err?.message?.includes('Invalid API key')) {
+        console.warn("[/api/agent/mcp] Connected accounts query notice:", err?.message);
+      }
     }
 
-    // 3. Create or retrieve session with MCP enabled
+    const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+    const fyshMcpUrl = `${proto}://${host}/api/agent/mcp?userId=${encodeURIComponent(googleUid)}`;
+
+    // 3. Handle GET request: Return connection metadata immediately without creating an active session
+    if (req.method === 'GET') {
+      return res.json({
+        url: fyshMcpUrl,
+        headers: {}, // Do NOT expose COMPOSIO_API_KEY
+        mcpUrl: fyshMcpUrl,
+        fyshMcpUrl,
+        fyshUserId: googleUid,
+        connectedToolkits: activeToolkits,
+        connectedAccountsCount: activeAccounts.length,
+        success: true
+      });
+    }
+
+    // 4. Handle POST request: Proxy JSON-RPC directly to session.mcp.url
+    const composio = getComposio();
     let session: any = null;
     const cacheKey = `${googleUid}_default`;
     const savedRecord = fishAgentDatabase.get(cacheKey);
@@ -1073,12 +1103,19 @@ app.all("/api/agent/mcp", async (req, res) => {
       try {
         session = await composio.create(composioUserId, sessionOptions);
       } catch (err: any) {
-        console.warn("[/api/agent/mcp] Session creation with preset failed, retrying simple:", err?.message);
+        const isAuth = err?.status === 401 || `${err?.message}`.includes('401') || `${err?.message}`.includes('Invalid API key');
+        if (isAuth) {
+          return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or expired."));
+        }
         try {
           session = await composio.create(composioUserId, { mcp: true });
         } catch (createErr: any) {
-          console.error("[/api/agent/mcp] Failed creating Composio MCP session:", createErr);
-          return res.status(500).json(formatAgentError("MCP_CONNECTION_FAILED", "Failed to establish agent session"));
+          const isCreateAuth = createErr?.status === 401 || `${createErr?.message}`.includes('401') || `${createErr?.message}`.includes('Invalid API key');
+          if (isCreateAuth) {
+            return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or expired."));
+          }
+          console.warn("[/api/agent/mcp] Failed creating Composio MCP session:", createErr?.message);
+          return res.status(502).json(formatAgentError("MCP_CONNECTION_FAILED", "Failed to establish agent session"));
         }
       }
     }
@@ -1103,48 +1140,33 @@ app.all("/api/agent/mcp", async (req, res) => {
     fishAgentDatabase.set(session.sessionId, sessionRecord);
     persistSessionsToDisk();
 
-    // 4. Handle POST request: Proxy JSON-RPC directly to session.mcp.url
-    if (req.method === 'POST') {
-      try {
-        const upstreamHeaders: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/event-stream',
-          'x-api-key': apiKey
-        };
+    try {
+      const upstreamHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'x-api-key': apiKey
+      };
 
-        const forwardRes = await fetch(mcpUrl, {
-          method: 'POST',
-          headers: upstreamHeaders,
-          body: JSON.stringify(req.body || {})
-        });
+      const forwardRes = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: upstreamHeaders,
+        body: JSON.stringify(req.body || {})
+      });
 
-        const contentType = forwardRes.headers.get('content-type') || 'application/json';
-        res.setHeader('Content-Type', contentType);
-        res.status(forwardRes.status);
-        const bodyText = await forwardRes.text();
-        return res.send(bodyText);
-      } catch (proxyErr: any) {
-        console.error("[/api/agent/mcp] Proxying error:", proxyErr);
-        return res.status(502).json(formatAgentError("TOOL_EXECUTION_FAILED", "Error executing MCP request"));
-      }
+      const contentType = forwardRes.headers.get('content-type') || 'application/json';
+      res.setHeader('Content-Type', contentType);
+      res.status(forwardRes.status);
+      const bodyText = await forwardRes.text();
+      return res.send(bodyText);
+    } catch (proxyErr: any) {
+      console.warn("[/api/agent/mcp] Proxying error:", proxyErr?.message);
+      return res.status(502).json(formatAgentError("TOOL_EXECUTION_FAILED", "Error executing MCP request"));
     }
-
-    // 5. Handle GET request: Return connection metadata
-    const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
-    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
-    const fyshMcpUrl = `${proto}://${host}/api/agent/mcp?userId=${encodeURIComponent(googleUid)}`;
-
-    return res.json({
-      url: fyshMcpUrl,
-      headers: {}, // Do NOT expose COMPOSIO_API_KEY
-      mcpUrl: fyshMcpUrl,
-      fyshMcpUrl,
-      fyshUserId: googleUid,
-      connectedToolkits: activeToolkits,
-      connectedAccountsCount: activeAccounts.length,
-      success: true
-    });
   } catch (error: any) {
+    const isAuth = error?.status === 401 || `${error?.message}`.includes('401') || `${error?.message}`.includes('Invalid API key');
+    if (isAuth) {
+      return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or expired."));
+    }
     console.error("[/api/agent/mcp] Top-level handler error:", error);
     return res.status(500).json(formatAgentError("AGENT_CONNECTION_FAILED", error.message));
   }
@@ -1173,8 +1195,10 @@ app.post("/api/agents/connect", async (req, res) => {
       const items = list?.items || (Array.isArray(list) ? list : []);
       const active = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
       activeToolkits = Array.from(new Set(active.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
-    } catch (e) {
-      console.warn("[/api/agents/connect] List error:", e);
+    } catch (e: any) {
+      if (!e?.message?.includes('401') && !e?.message?.includes('Invalid API key')) {
+        console.warn("[/api/agents/connect] List error:", e?.message);
+      }
     }
 
     const sessionOptions: any = { mcp: true };
@@ -1187,7 +1211,19 @@ app.post("/api/agents/connect", async (req, res) => {
     try {
       session = await composio.create(composioUserId, sessionOptions);
     } catch (err: any) {
-      session = await composio.create(composioUserId, { mcp: true });
+      const isAuth = err?.status === 401 || `${err?.message}`.includes('401') || `${err?.message}`.includes('Invalid API key');
+      if (isAuth) {
+        return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or unauthorized"));
+      }
+      try {
+        session = await composio.create(composioUserId, { mcp: true });
+      } catch (err2: any) {
+        const isAuth2 = err2?.status === 401 || `${err2?.message}`.includes('401') || `${err2?.message}`.includes('Invalid API key');
+        if (isAuth2) {
+          return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or unauthorized"));
+        }
+        throw err2;
+      }
     }
 
     const mcpUrl = session.mcp?.url || (session.mcp as any)?.url;
@@ -1220,6 +1256,10 @@ app.post("/api/agents/connect", async (req, res) => {
       agentType: resolvedAgentType,
     });
   } catch (error: any) {
+    const isAuth = error?.status === 401 || `${error?.message}`.includes('401') || `${error?.message}`.includes('Invalid API key');
+    if (isAuth) {
+      return res.status(401).json(formatAgentError("INVALID_API_KEY", "Composio service configuration is invalid or unauthorized"));
+    }
     console.error("Error in /api/agents/connect:", error);
     return res.status(500).json(formatAgentError("AGENT_CONNECTION_FAILED", error.message || "Failed to connect agent"));
   }
