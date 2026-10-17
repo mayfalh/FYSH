@@ -480,6 +480,14 @@ export function ApiKeysPage({
                   ? 'إدارة مفاتيح API للمصادقة مع هذا المشروع وربط كافة تطبيقاتك مع الوكلاء بنقرة واحدة.' 
                   : 'Manage API keys for authenticating with this project.'}
               </p>
+
+              {!isLoggedIn && (
+                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 leading-relaxed">
+                  {isArabic
+                    ? 'أنت في مساحة العرض. سجّل الدخول بحسابك (Google) حتى تظهر مفاتيحك الحقيقية، ويرتبط المفتاح بتطبيقاتك التي ربطتها في قسم «التطبيقات» — فيعمل وكيلك مباشرة.'
+                    : 'You are in the demo workspace. Sign in with your Google account to see your real keys and link them to your connected apps.'}
+                </div>
+              )}
             </div>
 
             <button
