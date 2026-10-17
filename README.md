@@ -71,6 +71,7 @@ node scripts/fysh-doctor.mjs --user <uid> --link gmail # اختبار إنشاء
 ## التوثيق
 
 - [دليل ربط التطبيقات والتشغيل واستكشاف الأخطاء](docs/COMPOSIO-SETUP-AR.md)
+- [النشر وربط الدومين fysh.online](docs/DEPLOY-DOMAIN-AR.md)
 
 ## الترخيص والاستخدام
 

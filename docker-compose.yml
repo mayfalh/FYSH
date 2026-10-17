@@ -1,0 +1,23 @@
+# تشغيل فيش على خادم VPS (مثل Hostinger VPS) باستخدام Docker
+# 1) انسخ المشروع إلى الخادم  2) ضع المفاتيح في .env  3) docker compose up -d
+services:
+  fysh:
+    build: .
+    container_name: fysh
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      APP_BASE_URL: https://fysh.online
+    volumes:
+      # مهم: بدون هذا المجلد تُفقد مفاتيح العملاء عند إعادة إنشاء الحاوية
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

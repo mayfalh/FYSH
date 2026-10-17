@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: fysh
+    runtime: docker
+    # خطة مجانية للتجربة؛ للتشغيل الجدي استخدم starter لأن الخطة المجانية
+    # تنام بعد خمول ولا تحتفظ بالقرص.
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_BASE_URL
+        value: https://fysh.online
+      # تُضاف من لوحة Render (Settings → Environment) ولا تُكتب في المستودع
+      - key: COMPOSIO_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+    disk:
+      name: fysh-data
+      mountPath: /app/data
+      sizeGB: 1
