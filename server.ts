@@ -23,6 +23,16 @@ import {
   type NormalizedAccount,
   type UserAccountsResult,
 } from "./serverComposio";
+import {
+  storageMode,
+  loadKeysFromDb,
+  upsertKeyToDb,
+  deleteKeyFromDb,
+  userFromRequest,
+  maxKeysPerUser,
+  requireAuthForKeys,
+  type PersistedKey,
+} from "./serverStorage";
 
 // تحميل ملفات البيئة: .env.local ثم .env (قيم البيئة الحقيقية لها الأولوية)
 dotenv.config({ path: ".env.local" });
@@ -1464,6 +1474,8 @@ function ensurePersistDir() {
 }
 let persistKeysPending = false;
 function persistKeysToDisk() {
+  // في وضع Supabase تُكتب المفاتيح صفًّا بصف عبر serverStorage (أسرع وأأمن).
+  if (storageMode() === "supabase") return;
   if (persistKeysPending) return;
   persistKeysPending = true;
   setImmediate(() => {
@@ -1524,6 +1536,55 @@ function loadSessionsFromDisk() {
 loadKeysFromDisk();
 loadSessionsFromDisk();
 
+/** يحوّل سجل المفتاح إلى الشكل الذي تُخزَّنه قاعدة البيانات. */
+function toPersistedKey(record: StoredApiKey): PersistedKey {
+  return {
+    id: record.id,
+    name: record.name,
+    plain: record.token,
+    masked: record.maskedToken,
+    access: record.access,
+    ipAllowlist: record.ipAllowlist,
+    userId: record.userId,
+    userEmail: record.userEmail,
+    status: record.status,
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
+  };
+}
+
+/** يستبدل الذاكرة بما في قاعدة البيانات (إن كانت مُهيّأة). */
+async function hydrateKeysFromDb() {
+  if (storageMode() !== "supabase") return;
+  try {
+    const rows = await loadKeysFromDb();
+    fyshApiKeysDatabase.clear();
+    tokenIndex.clear();
+    for (const row of rows) {
+      const record: StoredApiKey = {
+        id: row.id,
+        name: row.name,
+        token: row.plain,
+        maskedToken: row.masked,
+        access: (row.access as StoredApiKey["access"]) || "Full access",
+        ipAllowlist: row.ipAllowlist,
+        userId: row.userId,
+        userEmail: row.userEmail,
+        createdAt: row.createdAt,
+        lastUsedAt: row.lastUsedAt,
+        status: row.status,
+      };
+      fyshApiKeysDatabase.set(record.id, record);
+      tokenIndex.set(record.token, record.id);
+    }
+    console.log(`[STORAGE] loaded ${rows.length} keys from Supabase`);
+  } catch (err: any) {
+    console.warn("[STORAGE] failed to load keys from Supabase:", err?.message);
+  }
+}
+
+void hydrateKeysFromDb();
+
 function generateSecureApiKeyToken(): string {
   // Use crypto for production-grade entropy
   const randomPart = crypto.randomBytes(21).toString('base64url'); // 28 chars
@@ -1566,7 +1627,7 @@ function ensureInitialKeysForUser(userId: string, userEmail?: string) {
 }
 
 // 1. List API Keys for user
-app.get("/api/fish/keys", (req, res) => {
+app.get("/api/fish/keys", async (req, res) => {
   try {
     const userId = (req.query.fishUserId as string) || "mayalfalh_workspace";
     const userEmail = (req.query.userEmail as string) || "mayalfalh@gmail.com";
@@ -1576,7 +1637,10 @@ app.get("/api/fish/keys", (req, res) => {
       .filter(k => k.userId === userId && k.status === 'ACTIVE')
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    res.json({ success: true, keys });
+    const viewer = await userFromRequest(req).catch(() => null);
+    const canReveal = !!viewer && viewer.uid === userId;
+    const safeKeys = keys.map(k => ({ ...k, token: canReveal ? k.token : undefined }));
+    res.json({ success: true, keys: safeKeys, canReveal, storage: storageMode() });
   } catch (error: any) {
     console.error("Error in /api/fish/keys:", error);
     res.status(500).json({ error: error.message || "Failed to list API keys" });
@@ -1584,13 +1648,34 @@ app.get("/api/fish/keys", (req, res) => {
 });
 
 // 2. Create a new API Key
-app.post("/api/fish/keys/create", rateLimit(60_000, 50), (req, res) => {
+app.post("/api/fish/keys/create", rateLimit(60_000, 50), async (req, res) => {
   try {
     const { fishUserId, name, access, ipAllowlist, userEmail } = req.body;
-    const resolvedUserId = fishUserId || "mayalfalh_workspace";
+
+    // الهوية: إن أرسل العميل Firebase ID Token نتحقق منه ونربط المفتاح به
+    const viewer = await userFromRequest(req).catch(() => null);
+    if (requireAuthForKeys() && !viewer) {
+      return res.status(401).json({ error: "Authentication required to create an API key" });
+    }
+    if (viewer && fishUserId && fishUserId !== viewer.uid) {
+      return res.status(403).json({ error: "You can only create keys for your own account" });
+    }
+
+    const resolvedUserId = viewer?.uid || fishUserId || "mayalfalh_workspace";
+    const resolvedEmail = viewer?.email || userEmail;
     const resolvedName = name?.trim() || "FYSH_Agent_Key";
     const resolvedAccess = access || "Full access";
     const resolvedIp = ipAllowlist?.trim() || "No restriction";
+
+    // حد أقصى للمفاتيح النشطة لكل مستخدم (حماية من الإساءة والنمو غير المحدود)
+    const ownedActive = Array.from(fyshApiKeysDatabase.values())
+      .filter(k => k.userId === resolvedUserId && k.status === "ACTIVE");
+    if (ownedActive.length >= maxKeysPerUser()) {
+      return res.status(429).json({
+        error: `Key limit reached (${maxKeysPerUser()}). Delete an existing key first.`,
+        limit: maxKeysPerUser(),
+      });
+    }
 
     const rawToken = generateSecureApiKeyToken();
     const masked = maskToken(rawToken);
@@ -1606,7 +1691,7 @@ app.post("/api/fish/keys/create", rateLimit(60_000, 50), (req, res) => {
       access: resolvedAccess,
       ipAllowlist: resolvedIp,
       userId: resolvedUserId,
-      userEmail: userEmail || "mayalfalh@gmail.com",
+      userEmail: resolvedEmail || "mayalfalh@gmail.com",
       createdAt: formattedUtc,
       status: "ACTIVE"
     };
@@ -1614,6 +1699,9 @@ app.post("/api/fish/keys/create", rateLimit(60_000, 50), (req, res) => {
     fyshApiKeysDatabase.set(newKey.id, newKey);
     tokenIndex.set(rawToken, newKey.id);
     persistKeysToDisk();
+    void upsertKeyToDb(toPersistedKey(newKey)).catch(err =>
+      console.warn("[STORAGE] failed to persist key:", err?.message)
+    );
 
     res.json({
       success: true,
@@ -1628,15 +1716,22 @@ app.post("/api/fish/keys/create", rateLimit(60_000, 50), (req, res) => {
 });
 
 // 3. Delete / Revoke an API Key
-app.delete("/api/fish/keys/:keyId", (req, res) => {
+app.delete("/api/fish/keys/:keyId", async (req, res) => {
   try {
     const { keyId } = req.params;
     const existing = fyshApiKeysDatabase.get(keyId);
+    const viewer = await userFromRequest(req).catch(() => null);
+    if (viewer && existing && existing.userId !== viewer.uid) {
+      return res.status(403).json({ error: "You can only delete your own keys" });
+    }
     if (existing) {
       existing.status = "REVOKED";
       tokenIndex.delete(existing.token);
       fyshApiKeysDatabase.delete(keyId);
       persistKeysToDisk();
+      void deleteKeyFromDb(keyId).catch(err =>
+        console.warn("[STORAGE] failed to delete key:", err?.message)
+      );
     }
     res.json({ success: true, message: "API key deleted successfully" });
   } catch (error: any) {

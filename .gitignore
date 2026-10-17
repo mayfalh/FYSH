@@ -11,3 +11,4 @@ data/*.json
 
 # نسخ احتياطية لأداة الدمج
 server.ts.bak-*
+data/.fysh-store-key
