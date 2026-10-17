@@ -1,5 +1,7 @@
 import { ALL_COMPOSIO_APPS, AppItem } from '../data/appsData';
 
+// ملاحظة: هوية المستخدم الموحّدة تُدار عبر دالة getOrCreateStableFishUserId أدناه.
+
 export const FISH_USER_ID_KEY = 'fysh_composio_user_id';
 export const CONNECTED_ACCOUNTS_EVENT = 'fysh:connected_accounts_changed';
 
@@ -10,7 +12,11 @@ export interface ConnectedAccountItem {
   name?: string;
   category?: string;
   logo?: string;
-  status: 'ACTIVE' | 'CONNECTED' | 'DISCONNECTED' | 'INITIALIZING';
+  /** حالة الحساب كما تعيدها Composio: ACTIVE جاهز، EXPIRED يحتاج إعادة ربط. */
+  status: 'ACTIVE' | 'CONNECTED' | 'DISCONNECTED' | 'INITIALIZING' | 'EXPIRED' | 'FAILED' | 'UNKNOWN';
+  /** true عندما تنتهي صلاحية الربط ويجب على المستخدم إعادة الربط. */
+  needsReconnect?: boolean;
+  statusReason?: string;
   authScheme?: string;
   userId?: string;
   createdAt?: string;
@@ -58,13 +64,9 @@ export async function fetchUserConnectedAccounts(fishUserId?: string): Promise<C
     const data = await res.json();
     const accounts: any[] = data.accounts || [];
 
-    // Filter strictly to ACTIVE or CONNECTED accounts
-    const activeAccounts = accounts.filter((acc: any) => {
-      const s = (acc.status || '').toUpperCase();
-      return s === 'ACTIVE' || s === 'CONNECTED';
-    });
-
-    return activeAccounts.map((acc: any) => {
+    // نرجع كل الحسابات (بما فيها المنتهية) حتى تستطيع الواجهة أن تطلب إعادة الربط
+    // بدل أن تُظهر التطبيق كأنه غير مرتبط بلا سبب.
+    return accounts.map((acc: any) => {
       const slug = (acc.toolkit || acc.toolkitSlug || acc.app || '').toLowerCase().trim().replace(/[-_]/g, '');
       const rawName = (acc.appName || acc.toolkit || '').toLowerCase().trim().replace(/[-_]/g, '');
 
@@ -80,7 +82,9 @@ export async function fetchUserConnectedAccounts(fishUserId?: string): Promise<C
         appName: matchedApp ? matchedApp.name : (acc.appName || acc.toolkit || 'Connected App'),
         category: matchedApp ? matchedApp.category : (acc.category || 'Productivity & Workspace'),
         logo: matchedApp ? matchedApp.logo : (acc.logo || `https://logos.composio.dev/api/${acc.toolkit || 'composio'}`),
-        status: 'ACTIVE',
+        status: ((acc.status || 'UNKNOWN').toUpperCase()) as ConnectedAccountItem['status'],
+        needsReconnect: !!acc.needsReconnect,
+        statusReason: acc.statusReason,
         authScheme: acc.authScheme || 'OAUTH2',
         userId: acc.userId || uid,
         createdAt: acc.createdAt || new Date().toISOString(),
@@ -132,8 +136,9 @@ export async function disconnectUserAccount(accountId: string, fishUserId?: stri
 
 export async function initiateComposioConnect(
   app: AppItem | { id: string; name: string; composioSlug?: string; slug?: string },
-  fishUserId?: string
-): Promise<{ success: boolean; redirectUrl?: string; error?: string; connectedAccountId?: string }> {
+  fishUserId?: string,
+  opts?: { force?: boolean }
+): Promise<{ success: boolean; redirectUrl?: string; error?: string; connectedAccountId?: string; alreadyConnected?: boolean }> {
   try {
     const uid = fishUserId || getOrCreateStableFishUserId();
     const slug = (app as any).composioSlug || (app as any).slug || app.id;
@@ -147,12 +152,13 @@ export async function initiateComposioConnect(
         appSlug: slug,
         appName: app.name,
         fishUserId: uid,
+        force: !!opts?.force,
         callbackUrl: `${window.location.origin}/api/composio/callback`
       })
     });
 
     const data = await res.json();
-    if (!res.ok || data.error || !data.success) {
+    if (!res.ok || data.error || (!data.success && !data.alreadyConnected)) {
       return {
         success: false,
         error: data.error || `Failed to initiate connection for ${app.name}`
@@ -162,7 +168,8 @@ export async function initiateComposioConnect(
     return {
       success: true,
       redirectUrl: data.redirectUrl,
-      connectedAccountId: data.connectedAccountId
+      connectedAccountId: data.connectedAccountId,
+      alreadyConnected: !!data.alreadyConnected
     };
   } catch (err: any) {
     console.error('[COMPOSIO CLIENT] Connect error:', err);

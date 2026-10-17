@@ -8,3 +8,6 @@ coverage/
 !.env.example
 data/*.json
 !data/.gitkeep
+
+# نسخ احتياطية لأداة الدمج
+server.ts.bak-*

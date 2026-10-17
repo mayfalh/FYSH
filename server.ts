@@ -7,7 +7,25 @@ import dotenv from "dotenv";
 import { Composio } from "@composio/core";
 import { GoogleProvider } from "@composio/google";
 import { GoogleGenAI } from "@google/genai";
+import {
+  candidateFishUserIds,
+  canonicalFishUserId,
+  rawFishId,
+  fetchConnectedAccountsForUser,
+  getConnectedAccount,
+  deleteConnectedAccount,
+  cleanupAbandonedAccounts,
+  createConnectLink,
+  resolveAuthConfigId,
+  runDiagnostics,
+  envComposioApiKey,
+  ComposioApiError,
+  type NormalizedAccount,
+  type UserAccountsResult,
+} from "./serverComposio";
 
+// تحميل ملفات البيئة: .env.local ثم .env (قيم البيئة الحقيقية لها الأولوية)
+dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 const app = express();
@@ -59,15 +77,13 @@ setInterval(() => {
 }, 60_000).unref();
 
 // --- Unified Fish user ID helper (single source of truth) ---
+// الصيغة القياسية fish_user_<raw>، وأي صيغة أخرى (UID خام أو user_*) تُعامل
+// كمساحة قديمة يجب أن تبقى قابلة للقراءة حتى لا تختفي روابط المستخدمين.
 export function normalizeFishUserId(raw: string): string {
-  if (!raw) return "";
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('fish_user_')) return trimmed;
-  // If it's a Firebase UID or random id, prefix it
-  return `fish_user_${trimmed.replace(/^fish_user_/, '')}`;
+  return canonicalFishUserId(raw);
 }
 export function extractGoogleUid(fishUserId: string): string {
-  return fishUserId.replace(/^fish_user_/, '');
+  return rawFishId(fishUserId);
 }
 
 // Ensure environment variables are loaded and validated
@@ -95,6 +111,52 @@ export function getComposio(): Composio<any> {
     });
   }
   return composioClient;
+}
+
+/* ------------------------------------------------------------------ */
+/* Unified connection loading                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * كل الروابط التي تخص هذا المستخدم: المعرّف القياسي أولًا ثم المساحات القديمة
+ * التي كتبت فيها الإصدارات السابقة (بلا بادئة fish_user_). لا يرمي أبدًا.
+ */
+export async function loadUserConnectionsSafe(rawUserId: string): Promise<UserAccountsResult> {
+  try {
+    const projectKey = envComposioApiKey();
+    if (!projectKey) throw new Error("Composio project key is missing on the server");
+    return await fetchConnectedAccountsForUser(projectKey, rawUserId);
+  } catch (err: any) {
+    console.warn("[COMPOSIO] connection lookup failed:", err?.message);
+    return {
+      canonicalUserId: canonicalFishUserId(rawUserId),
+      candidates: candidateFishUserIds(rawUserId),
+      accounts: [],
+      active: [],
+      needsReconnect: [],
+    };
+  }
+}
+
+/** صلاحيات التطبيقات النشطة بصيغة Composio القياسية. */
+export function activeToolkitSlugs(accounts: NormalizedAccount[]): string[] {
+  return Array.from(
+    new Set(
+      accounts
+        .filter(a => a.isActive)
+        .map(a => mapToolkitToComposioSlug(a.toolkitSlug))
+        .filter(Boolean)
+    )
+  );
+}
+
+/** أول حساب نشط لتطبيق معيّن (أو null). */
+export function findActiveAccount(
+  accounts: NormalizedAccount[],
+  toolkitSlug: string
+): NormalizedAccount | null {
+  const wanted = mapToolkitToComposioSlug(toolkitSlug);
+  return accounts.find(a => a.isActive && mapToolkitToComposioSlug(a.toolkitSlug) === wanted) || null;
 }
 
 // In-memory/local Fish agent sessions database conforming to schema
@@ -230,18 +292,11 @@ export function mapToolkitToComposioSlug(toolkitId: string): string {
 export async function setupFishUserAgent(fishUserId: string, agentType: string) {
   const composio = getComposio();
   const googleUid = fishUserId.startsWith('fish_user_') ? fishUserId.replace('fish_user_', '') : fishUserId;
-  const composioUserId = `fish_user_${googleUid}`;
+  const composioUserId = canonicalFishUserId(googleUid);
 
-  // Query user's connected accounts to get toolkits
-  let activeToolkits: string[] = [];
-  try {
-    const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
-    const items = list?.items || (Array.isArray(list) ? list : []);
-    const active = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
-    activeToolkits = Array.from(new Set(active.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
-  } catch (e) {
-    console.warn("[setupFishUserAgent] Failed listing connected accounts:", e);
-  }
+  // Query user's connected accounts to get toolkits (canonical + legacy namespaces)
+  const connections = await loadUserConnectionsSafe(fishUserId);
+  const activeToolkits: string[] = activeToolkitSlugs(connections.accounts);
 
   const sessionOptions: any = { mcp: true };
   if (activeToolkits.length > 0) {
@@ -271,7 +326,7 @@ export async function setupFishUserAgent(fishUserId: string, agentType: string) 
 export async function connectFishUserToolkit(fishUserId: string, toolkit: string, callbackUrl?: string) {
   const composio = getComposio();
   const googleUid = fishUserId.startsWith('fish_user_') ? fishUserId.replace('fish_user_', '') : fishUserId;
-  const composioUserId = `fish_user_${googleUid}`;
+  const composioUserId = canonicalFishUserId(googleUid);
   const effectiveCallback = callbackUrl || "http://localhost:3000/api/composio/callback";
   const normalizedToolkit = mapToolkitToComposioSlug(toolkit);
   const session = await composio.create(composioUserId, { 
@@ -480,11 +535,17 @@ app.get("/api/health/composio", async (req, res) => {
     if (!process.env.COMPOSIO_API_KEY) {
       return res.json({ valid: false, message: "Composio API Key is not set in environment variables" });
     }
-    const composio = getComposio();
-    const result: any = await composio.connectedAccounts.list({ userIds: ['test_probe_user'] } as any);
-    const statusCode = result?.status || 200;
-    console.log("Composio API health check status code:", statusCode);
-    return res.json({ valid: true, message: "Composio API Key is working" });
+    const report = await runDiagnostics(envComposioApiKey());
+    if (!report.valid) {
+      return res.json({ valid: false, message: "Composio rejected the project key", detail: report.reason });
+    }
+    return res.json({
+      valid: true,
+      message: "Composio project key is working",
+      toolkitCount: report.toolkitCount,
+      authConfigCount: report.authConfigs.length,
+      checkedAt: report.checkedAt,
+    });
   } catch (error: any) {
     const statusCode = error?.status || error?.statusCode || error?.response?.status || error?.code || 500;
     console.log("Composio API health check status code:", statusCode);
@@ -525,155 +586,104 @@ app.get("/api/composio/toolkits", async (req, res) => {
 });
 
 // Get connected accounts for a specific FYSH user
+// يقرأ القائمة من كل مساحات المعرّفات (القياسية والقديمة) حتى لا تختفي روابط المستخدم.
 app.get("/api/composio/connectedAccounts", async (req, res) => {
   try {
-    const rawUserId = req.query.fishUserId as string;
-    if (!rawUserId || !process.env.COMPOSIO_API_KEY) {
-      return res.json({ accounts: [] });
+    const rawUserId = (req.query.fishUserId || req.query.userId || req.query.uid) as string;
+    const projectKey = envComposioApiKey();
+    if (!rawUserId || !projectKey) {
+      return res.json({ accounts: [], active: [], needsReconnect: [], candidates: [] });
     }
 
-    const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
-    const composioUserId = `fish_user_${googleUid}`;
-    const apiKey = process.env.COMPOSIO_API_KEY;
+    const connections = await fetchConnectedAccountsForUser(projectKey, rawUserId);
 
-    // Use Composio v3.1 REST API directly for accurate connected accounts listing
-    const fetchUrl = `https://backend.composio.dev/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(composioUserId)}`;
-    const response = await fetch(fetchUrl, {
-      headers: { 'x-api-key': apiKey }
+    // نفس شكل الاستجابة القديم + حقول إضافية تفهمها الواجهة الجديدة.
+    const accounts = connections.accounts.map(a => ({
+      id: a.id,
+      toolkit: a.toolkitSlug,
+      toolkitSlug: a.toolkitSlug,
+      appName: a.toolkitName,
+      logo: a.logo,
+      authScheme: a.authScheme,
+      status: a.status,
+      userId: a.userId,
+      alias: a.alias,
+      createdAt: a.createdAt,
+      statusReason: a.statusReason,
+      needsReconnect: a.needsReconnect,
+      isActive: a.isActive,
+    }));
+
+    res.json({
+      accounts,
+      active: accounts.filter(a => a.isActive),
+      needsReconnect: accounts.filter(a => a.needsReconnect),
+      canonicalUserId: connections.canonicalUserId,
+      candidates: connections.candidates,
     });
-
-    if (!response.ok) {
-      if (response.status !== 401 && response.status !== 403) {
-        console.warn(`[COMPOSIO] Connected accounts fetch returned status ${response.status}`);
-      }
-      return res.json({ accounts: [] });
-    }
-
-    const data = await response.json();
-    const rawItems = data.items || (Array.isArray(data) ? data : []);
-
-    // Filter strictly active / valid connections for this user (ignore INITIATED, FAILED, PENDING attempts)
-    const accounts = rawItems
-      .filter((item: any) => {
-        const s = (item.status || item.data?.status || item.state?.val?.status || '').toUpperCase();
-        return s === 'ACTIVE' || s === 'CONNECTED';
-      })
-      .map((item: any) => {
-        const slug = item.toolkit?.slug || item.toolkit_slug || item.app || '';
-        const name = item.toolkit?.name || item.name || item.app || slug;
-        return {
-          id: item.id || item.connected_account_id,
-          toolkit: slug,
-          toolkitSlug: slug,
-          appName: name,
-          logo: item.toolkit?.logo || `https://logos.composio.dev/api/${slug}`,
-          authScheme: item.auth_scheme || item.authScheme || 'OAUTH2',
-          status: 'ACTIVE',
-          userId: item.user_id || composioUserId,
-          createdAt: item.created_at || item.createdAt || new Date().toISOString()
-        };
-      });
-
-    res.json({ accounts });
   } catch (error: any) {
-    if (!error?.message?.includes('401') && !error?.message?.includes('Invalid API key')) {
-      console.warn("[COMPOSIO] Failed to list connected accounts:", error.message);
-    }
-    res.json({ accounts: [] });
+    console.warn("[COMPOSIO] Failed to list connected accounts:", error?.message);
+    res.json({ accounts: [], active: [], needsReconnect: [], candidates: [] });
   }
 });
 
-// Resolve or create Auth Config for any toolkit slug with strict slug and status matching
-async function resolveComposioAuthConfig(toolkitSlug: string, apiKey: string): Promise<string> {
-  const normSlug = mapToolkitToComposioSlug(toolkitSlug);
-  console.log(`[COMPOSIO] Resolving auth config for toolkit: ${normSlug} (original: ${toolkitSlug})`);
-
-  // 1. Query existing auth configs for the exact toolkit slug
-  const getRes = await fetch(`https://backend.composio.dev/api/v3.1/auth_configs?limit=100`, {
-    headers: { 'x-api-key': apiKey }
-  });
-
-  if (getRes.ok) {
-    const getData = await getRes.json();
-    const existing = getData.items || [];
-    
-    // Strict match by toolkit slug and enabled status, preferring tool_router enabled
-    const match = existing.find((item: any) => {
-      const itemSlug = mapToolkitToComposioSlug(item.toolkit?.slug || item.slug || '');
-      const isEnabled = item.status === 'ENABLED';
-      return itemSlug === normSlug && isEnabled && item.is_enabled_for_tool_router !== false;
-    }) || existing.find((item: any) => {
-      const itemSlug = mapToolkitToComposioSlug(item.toolkit?.slug || item.slug || '');
-      return itemSlug === normSlug && item.status === 'ENABLED';
+// تشخيص شامل لحالة التكامل (بدون كشف أي مفتاح)
+app.get("/api/composio/diagnostics", async (req, res) => {
+  try {
+    const projectKey = envComposioApiKey();
+    const rawUserId = (req.query.fishUserId || req.query.userId || "") as string;
+    const report = await runDiagnostics(projectKey, rawUserId || undefined);
+    res.json({
+      ...report,
+      authConfigs: report.authConfigs.map(c => ({
+        id: c.id,
+        toolkit: c.toolkitSlug,
+        name: c.name,
+        status: c.status,
+        authScheme: c.authScheme,
+        enabledForSessions: c.isEnabledForToolRouter !== false,
+      })),
     });
-
-    if (match && (match.id || match.nanoid)) {
-      const authConfigId = match.id || match.nanoid;
-      // If found but tool router is disabled, ensure it is enabled
-      if (match.is_enabled_for_tool_router === false && match.id) {
-        try {
-          await fetch(`https://backend.composio.dev/api/v3.1/auth_configs/${match.id}`, {
-            method: 'PATCH',
-            headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ is_enabled_for_tool_router: true })
-          });
-        } catch (patchErr) {
-          console.warn("[COMPOSIO] Failed to enable tool_router on auth config:", patchErr);
-        }
-      }
-      console.log(`[COMPOSIO] Auth config found: ${authConfigId} for ${normSlug} (name: ${match.name})`);
-      return authConfigId;
-    }
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "diagnostics failed" });
   }
+});
 
-  // 2. If not found, create an on-demand Composio-managed auth config with is_enabled_for_tool_router: true
-  console.log(`[COMPOSIO] Creating on-demand auth config for: ${normSlug}`);
-  const createRes = await fetch('https://backend.composio.dev/api/v3/auth_configs', {
-    method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      toolkit: { slug: normSlug },
-      name: `auth_config_${normSlug}_${Date.now()}`,
-      auth_scheme: 'OAUTH2',
-      is_composio_managed: true,
-      is_enabled_for_tool_router: true
-    })
-  });
-
-  if (createRes.ok) {
-    const createData = await createRes.json();
-    const authConfigId = createData.id || createData.auth_config?.id || createData.nanoid;
-    if (authConfigId) {
-      console.log(`[COMPOSIO] Auth config created: ${authConfigId} for ${normSlug}`);
-      return authConfigId;
-    }
+// تنظيف المحاولات المهجورة (منتهية/معلّقة) لمستخدم معيّن
+app.post("/api/composio/cleanup", async (req, res) => {
+  try {
+    const projectKey = envComposioApiKey();
+    const rawUserId = (req.body?.fishUserId || req.body?.userId || "") as string;
+    if (!projectKey) return res.status(500).json({ success: false, error: "Composio is not configured" });
+    if (!rawUserId) return res.status(400).json({ success: false, error: "fishUserId is required" });
+    const result = await cleanupAbandonedAccounts(projectKey, rawUserId);
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error?.message || "cleanup failed" });
   }
+});
 
-  const errBody = await createRes.text();
-  console.error(`[COMPOSIO ERROR] Failed to create auth config for ${normSlug}:`, errBody);
-  throw new Error(`Could not resolve or create Composio Auth Config for ${normSlug}`);
+// Resolve or create Auth Config for a toolkit through the shared v3.1 layer
+async function resolveComposioAuthConfig(toolkitSlug: string, projectKey: string): Promise<string> {
+  return resolveAuthConfigId(projectKey, mapToolkitToComposioSlug(toolkitSlug), (m) => console.log(m));
 }
 
-// Connect endpoint: Resolves Auth Config and creates a Composio Connect Link
+// Connect endpoint: يحلّ auth config عبر v3.1 وينشئ رابط ربط (Connect Link)
 app.post("/api/composio/connect", rateLimit(60_000, 20), async (req, res) => {
   try {
-    const rawUserId = req.body.googleUid || req.body.fishUserId;
+    const rawUserId = req.body.googleUid || req.body.fishUserId || req.body.userId;
     if (!rawUserId) {
       return res.status(400).json({ success: false, error: "fishUserId is required" });
     }
 
-    const apiKey = process.env.COMPOSIO_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ success: false, error: "COMPOSIO_API_KEY is not configured on server" });
+    const projectKey = envComposioApiKey();
+    if (!projectKey) {
+      return res.status(500).json({ success: false, error: "Composio is not configured on the server" });
     }
 
-    const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
-    const composioUserId = `fish_user_${googleUid}`;
-    
-    // Extract raw slug from any parameter provided by client
+    const canonicalUserId = canonicalFishUserId(rawUserId);
+
+    // استخراج مُعرِّف التطبيق من أي حقل يرسله العميل
     const rawSlug = (
       req.body.toolkitSlug ||
       req.body.toolkitId ||
@@ -687,206 +697,189 @@ app.post("/api/composio/connect", rateLimit(60_000, 20), async (req, res) => {
     if (!rawSlug) {
       return res.status(400).json({ success: false, error: "Toolkit slug or app ID is required" });
     }
-    
-    const normalizedToolkit = mapToolkitToComposioSlug(rawSlug);
 
-    // Construct Safe Callback URL
+    const toolkitSlug = mapToolkitToComposioSlug(rawSlug);
+
+    // رابط العودة: env صريح ثم رؤوس البروكسي ثم المضيف الحالي
     const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
     const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
     const isHttps = proto === 'https' || (!host.includes('localhost') && !host.includes('127.0.0.1'));
-    const defaultCallback = `${isHttps ? 'https' : 'http'}://${host}/api/composio/callback`;
-    const callbackUrl = req.body.callbackUrl || defaultCallback;
+    const baseUrl = (process.env.APP_BASE_URL || '').replace(/\/$/, '') || `${isHttps ? 'https' : 'http'}://${host}`;
+    const callbackUrl = req.body.callbackUrl || `${baseUrl}/api/composio/callback`;
 
-    console.log(`[COMPOSIO] COMPOSIO_CONNECT_REQUEST toolkit=${normalizedToolkit} (raw: ${rawSlug}) user_id=${composioUserId} callback=${callbackUrl}`);
+    console.log(`[COMPOSIO] connect toolkit=${toolkitSlug} (raw: ${rawSlug}) user=${canonicalUserId} callback=${callbackUrl}`);
 
-    // Try Method 1: Resolve Auth Config and use REST connected_accounts/link
-    try {
-      const authConfigId = await resolveComposioAuthConfig(normalizedToolkit, apiKey);
-      const linkRes = await fetch('https://backend.composio.dev/api/v3.1/connected_accounts/link', {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          auth_config_id: authConfigId,
-          user_id: composioUserId,
-          callback_url: callbackUrl
-        })
-      });
-
-      if (linkRes.ok) {
-        const linkData = await linkRes.json();
-        console.log(`[COMPOSIO] Connect link created successfully for ${normalizedToolkit}:`, {
-          connected_account_id: linkData.connected_account_id,
-          has_redirect: !!linkData.redirect_url
-        });
-
-        return res.json({
-          success: true,
-          redirectUrl: linkData.redirect_url,
-          linkToken: linkData.link_token,
-          connectedAccountId: linkData.connected_account_id,
-          composioUserId,
-          toolkitSlug: normalizedToolkit
-        });
-      } else {
-        const errText = await linkRes.text();
-        console.warn(`[COMPOSIO WARNING] REST link creation returned ${linkRes.status}: ${errText}. Attempting SDK fallback...`);
+    // إعادة استخدام رابط نشط بدل إنشاء حساب مكرر
+    if (!req.body.force) {
+      try {
+        const existing = await fetchConnectedAccountsForUser(projectKey, canonicalUserId);
+        const already = findActiveAccount(existing.accounts, toolkitSlug);
+        if (already) {
+          return res.json({
+            success: true,
+            alreadyConnected: true,
+            connectedAccountId: already.id,
+            account: { id: already.id, toolkit: already.toolkitSlug, status: already.status },
+            composioUserId: canonicalUserId,
+            toolkitSlug,
+          });
+        }
+      } catch (lookupErr: any) {
+        console.warn("[COMPOSIO] existing-account check skipped:", lookupErr?.message);
       }
-    } catch (authConfigErr: any) {
-      console.warn(`[COMPOSIO WARNING] Auth config resolution error for ${normalizedToolkit}: ${authConfigErr.message}. Attempting SDK fallback...`);
     }
 
-    // Method 2 Fallback: Use Composio SDK session.authorize
+    // المسار الرسمي: Connect Link عبر v3.1
+    try {
+      const link = await createConnectLink(projectKey, {
+        userId: canonicalUserId,
+        toolkitSlug,
+        callbackUrl,
+        alias: req.body.alias,
+        log: (m) => console.log(m),
+      });
+      return res.json({
+        success: true,
+        redirectUrl: link.redirectUrl,
+        connectedAccountId: link.connectedAccountId,
+        authConfigId: link.authConfigId,
+        composioUserId: canonicalUserId,
+        toolkitSlug,
+      });
+    } catch (linkErr: any) {
+      console.warn(`[COMPOSIO] link creation failed for ${toolkitSlug}: ${linkErr?.message}`);
+      if (linkErr instanceof ComposioApiError && [400, 404, 422].includes(linkErr.status)) {
+        return res.status(linkErr.status).json({
+          success: false,
+          error: `تعذّر تجهيز الربط لـ ${toolkitSlug}: ${linkErr.message}`,
+          detail: linkErr.body ?? null,
+          toolkitSlug,
+        });
+      }
+    }
+
+    // احتياطي: جلسة SDK مع نفس المعرّف القياسي (يتجنّب الازدواج)
     try {
       const composio = getComposio();
-      const session = await composio.create(composioUserId, { 
-        mcp: true, 
-        manageConnections: { callbackUrl } 
+      const session = await composio.create(canonicalUserId, {
+        mcp: true,
+        manageConnections: { callbackUrl }
       });
-      const request: any = await session.authorize(normalizedToolkit, { callbackUrl });
+      const request: any = await session.authorize(toolkitSlug, { callbackUrl });
       const redirectUrl = request?.redirectUrl || request?.url;
-      
       if (redirectUrl) {
-        console.log(`[COMPOSIO SDK] Authorize created redirectUrl for ${normalizedToolkit}`);
         return res.json({
           success: true,
           redirectUrl,
           connectedAccountId: request?.connectedAccountId || request?.id,
-          composioUserId,
-          toolkitSlug: normalizedToolkit
+          composioUserId: canonicalUserId,
+          toolkitSlug,
         });
       }
     } catch (sdkErr: any) {
-      console.error(`[COMPOSIO SDK ERROR] Authorize failed for ${normalizedToolkit}:`, sdkErr.message);
+      console.error(`[COMPOSIO] SDK authorize failed for ${toolkitSlug}:`, sdkErr?.message);
+      return res.status(500).json({
+        success: false,
+        error: `تعذّر بدء الربط لـ ${toolkitSlug}: ${sdkErr?.message || 'unknown error'}`,
+        toolkitSlug,
+      });
     }
 
     return res.status(500).json({
       success: false,
-      error: `Could not initialize connection for ${normalizedToolkit}. Please verify integration status in Composio.`
+      error: `تعذّر بدء الربط لـ ${toolkitSlug}. تحقّق من حالة التكامل في Composio.`,
+      toolkitSlug,
     });
   } catch (error: any) {
-    console.error("[COMPOSIO ERROR] Connect error:", error.message);
-    res.status(500).json({ success: false, error: error.message || "Failed to initiate Composio connection" });
+    console.error("[COMPOSIO] connect error:", error?.message);
+    res.status(500).json({ success: false, error: error?.message || "Failed to initiate connection" });
   }
 });
 
-// Verify connection endpoint to check if an account is strictly ACTIVE
+// Verify connection endpoint: يعتبر الحساب متصلًا فقط عندما يكون ACTIVE
 app.post("/api/composio/verify", async (req, res) => {
   try {
     const { toolkitSlug, connectedAccountId } = req.body;
-    const rawUserId = req.body.googleUid || req.body.fishUserId;
+    const rawUserId = req.body.googleUid || req.body.fishUserId || req.body.userId;
     if (!rawUserId) {
       return res.status(400).json({ error: "fishUserId is required" });
     }
 
-    const apiKey = process.env.COMPOSIO_API_KEY;
-    if (!apiKey) {
+    const projectKey = envComposioApiKey();
+    if (!projectKey) {
       return res.json({ status: "DISCONNECTED", active: false });
     }
 
-    const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
-    const composioUserId = `fish_user_${googleUid}`;
-    const normSlug = mapToolkitToComposioSlug(toolkitSlug || '');
+    const toolkit = mapToolkitToComposioSlug(toolkitSlug || '');
+    console.log(`[COMPOSIO] verify toolkit=${toolkit} account=${connectedAccountId || 'by-user'}`);
 
-    console.log(`[COMPOSIO] Verifying connection: ${normSlug} (account: ${connectedAccountId || 'query'}, user: ${composioUserId})...`);
-
-    // 1. If specific connectedAccountId is provided, check directly
     if (connectedAccountId) {
-      const accRes = await fetch(`https://backend.composio.dev/api/v3.1/connected_accounts/${encodeURIComponent(connectedAccountId)}`, {
-        headers: { 'x-api-key': apiKey }
-      });
-      if (accRes.ok) {
-        const accData = await accRes.json();
-        const status = accData.status || accData.data?.status || accData.state?.val?.status;
-        console.log(`[COMPOSIO] Account ${connectedAccountId} status: ${status}`);
-        if (status === 'ACTIVE' || status === 'CONNECTED') {
-          console.log("[COMPOSIO] Connected account verified - Status: ACTIVE");
-          return res.json({ status: "ACTIVE", active: true, account: accData });
-        }
+      const direct = await getConnectedAccount(projectKey, connectedAccountId).catch(() => null);
+      if (direct) {
+        return res.json({
+          status: direct.status,
+          active: direct.isActive,
+          needsReconnect: direct.needsReconnect,
+          statusReason: direct.statusReason,
+          account: direct.raw,
+        });
       }
     }
 
-    // 2. Query all accounts for user and match toolkit
-    const listRes = await fetch(`https://backend.composio.dev/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(composioUserId)}`, {
-      headers: { 'x-api-key': apiKey }
+    const connections = await fetchConnectedAccountsForUser(projectKey, rawUserId);
+    const match =
+      connections.accounts.find(a => a.isActive && (!toolkit || mapToolkitToComposioSlug(a.toolkitSlug) === toolkit)) ||
+      connections.accounts.find(a => !toolkit || mapToolkitToComposioSlug(a.toolkitSlug) === toolkit);
+
+    if (!match) {
+      return res.json({ status: "DISCONNECTED", active: false, needsReconnect: false });
+    }
+    return res.json({
+      status: match.status,
+      active: match.isActive,
+      needsReconnect: match.needsReconnect,
+      statusReason: match.statusReason,
+      account: match.raw,
     });
-
-    if (listRes.ok) {
-      const listData = await listRes.json();
-      const items = listData.items || [];
-      const match = items.find((i: any) => {
-        const itemSlug = mapToolkitToComposioSlug(i.toolkit?.slug || i.toolkit_slug || '');
-        const itemStatus = i.status || i.data?.status || i.state?.val?.status;
-        return (itemSlug === normSlug || !normSlug) && (itemStatus === 'ACTIVE' || itemStatus === 'CONNECTED');
-      });
-
-      if (match) {
-        console.log(`[COMPOSIO] Connected account verified for ${normSlug} - Status: ACTIVE`);
-        return res.json({ status: "ACTIVE", active: true, account: match });
-      }
-    }
-
-    return res.json({ status: "INITIALIZING", active: false });
   } catch (error: any) {
-    console.error("[COMPOSIO ERROR] Verify error:", error.message);
-    res.status(500).json({ error: error.message, active: false });
+    console.error("[COMPOSIO] verify error:", error?.message);
+    res.status(500).json({ error: error?.message, active: false });
   }
 });
 
-// Disconnect account: Real deletion on Composio backend
+// Disconnect account: حذف حقيقي من Composio
 app.delete("/api/composio/disconnect", async (req, res) => {
   try {
     const { connectedAccountId, toolkitSlug } = req.body;
-    const rawUserId = req.body.googleUid || req.body.fishUserId;
-    const apiKey = process.env.COMPOSIO_API_KEY;
+    const rawUserId = req.body.googleUid || req.body.fishUserId || req.body.userId;
+    const projectKey = envComposioApiKey();
 
-    if (!apiKey) {
-      return res.status(500).json({ success: false, error: "Missing API key" });
+    if (!projectKey) {
+      return res.status(500).json({ success: false, error: "Composio is not configured" });
     }
 
     let targetAccountId = connectedAccountId;
 
-    // If account ID not passed directly, find it by toolkit and user
     if (!targetAccountId && rawUserId && toolkitSlug) {
-      const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
-      const composioUserId = `fish_user_${googleUid}`;
-      const normSlug = mapToolkitToComposioSlug(toolkitSlug);
-
-      const listRes = await fetch(`https://backend.composio.dev/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(composioUserId)}`, {
-        headers: { 'x-api-key': apiKey }
-      });
-
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        const items = listData.items || [];
-        const match = items.find((i: any) => mapToolkitToComposioSlug(i.toolkit?.slug || '') === normSlug);
-        if (match) targetAccountId = match.id;
-      }
+      const toolkit = mapToolkitToComposioSlug(toolkitSlug);
+      const connections = await fetchConnectedAccountsForUser(projectKey, rawUserId);
+      const match = connections.accounts.find(a => mapToolkitToComposioSlug(a.toolkitSlug) === toolkit);
+      if (match) targetAccountId = match.id;
     }
 
     if (!targetAccountId) {
       return res.status(400).json({ success: false, error: "connectedAccountId or (fishUserId + toolkitSlug) required" });
     }
 
-    console.log(`[COMPOSIO] Disconnecting connected account: ${targetAccountId}`);
-    const delRes = await fetch(`https://backend.composio.dev/api/v3.1/connected_accounts/${encodeURIComponent(targetAccountId)}`, {
-      method: 'DELETE',
-      headers: { 'x-api-key': apiKey }
-    });
-
-    if (!delRes.ok) {
-      const errText = await delRes.text();
-      console.error(`[COMPOSIO ERROR] Delete account ${targetAccountId} failed:`, errText);
-      return res.status(delRes.status).json({ success: false, error: "Failed to disconnect account" });
-    }
-
-    console.log(`[COMPOSIO] Connected account ${targetAccountId} disconnected successfully.`);
+    await deleteConnectedAccount(projectKey, targetAccountId);
+    console.log(`[COMPOSIO] disconnected account ${targetAccountId}`);
     res.json({ success: true, disconnectedId: targetAccountId });
   } catch (error: any) {
-    console.error("[COMPOSIO ERROR] Disconnect error:", error.message);
-    res.status(500).json({ success: false, error: error.message });
+    console.error("[COMPOSIO] disconnect error:", error?.message);
+    res.status(error?.status && error.status < 500 ? error.status : 500).json({
+      success: false,
+      error: error?.message || "Failed to disconnect account",
+    });
   }
 });
 
@@ -950,16 +943,13 @@ app.get("/api/composio/callback", async (req, res) => {
 app.delete("/api/composio/connectedAccounts/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const apiKey = process.env.COMPOSIO_API_KEY;
-    if (apiKey) {
-      await fetch(`https://backend.composio.dev/api/v3.1/connected_accounts/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: { 'x-api-key': apiKey }
-      });
+    const projectKey = envComposioApiKey();
+    if (projectKey) {
+      await deleteConnectedAccount(projectKey, id);
     }
-    res.json({ success: true });
+    res.json({ success: true, disconnectedId: id });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error?.message });
   }
 });
 
@@ -1044,22 +1034,12 @@ app.all("/api/agent/mcp", async (req, res) => {
     }
 
     const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
-    const composioUserId = `fish_user_${googleUid}`;
+    const composioUserId = canonicalFishUserId(googleUid);
 
-    // 2. Fetch user's active connected accounts
-    let activeToolkits: string[] = [];
-    let activeAccounts: any[] = [];
-    try {
-      const composio = getComposio();
-      const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
-      const items = list?.items || (Array.isArray(list) ? list : []);
-      activeAccounts = items.filter((a: any) => a.status === 'ACTIVE' || a.status === 'CONNECTED' || (!a.status && a.id));
-      activeToolkits = Array.from(new Set(activeAccounts.map((a: any) => mapToolkitToComposioSlug(a.toolkit?.slug || a.toolkit || a.app || a.toolkitSlug)).filter(Boolean)));
-    } catch (err: any) {
-      if (!err?.message?.includes('401') && !err?.message?.includes('Invalid API key')) {
-        console.warn("[/api/agent/mcp] Connected accounts query notice:", err?.message);
-      }
-    }
+    // 2. التطبيقات المرتبطة بكل مساحات المعرّف (القياسية والقديمة)
+    const connections = await loadUserConnectionsSafe(googleUid);
+    const activeAccounts = connections.active;
+    const activeToolkits = activeToolkitSlugs(connections.accounts);
 
     const host = req.get('x-forwarded-host') || req.get('host') || 'localhost:3000';
     const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
@@ -1184,7 +1164,7 @@ app.post("/api/agents/connect", async (req, res) => {
     }
     const googleUid = rawUserId.startsWith('fish_user_') ? rawUserId.replace('fish_user_', '') : rawUserId;
     const resolvedAgentType = agentType || "default";
-    const composioUserId = `fish_user_${googleUid}`;
+    const composioUserId = canonicalFishUserId(googleUid);
 
     const composio = getComposio();
 
@@ -1292,7 +1272,7 @@ app.post("/api/agents/retrieve", async (req, res) => {
 
     if (!session) {
       // Re-create session on demand
-      const composioUserId = `fish_user_${googleUid}`;
+      const composioUserId = canonicalFishUserId(googleUid);
       session = await composio.create(composioUserId, { mcp: true });
       savedRecord = {
         fishUserId: googleUid,
@@ -1714,7 +1694,7 @@ app.post("/api/fish/keys/verify", rateLimit(60_000, 30), async (req, res) => {
 
     try {
       const composio = getComposio();
-      const composioUserId = `fish_user_${resolvedUserId}`;
+      const composioUserId = canonicalFishUserId(resolvedUserId);
       const result: any = await composio.connectedAccounts.list({
         userIds: [composioUserId],
         userUuid: composioUserId
@@ -1743,65 +1723,86 @@ app.post("/api/fish/keys/verify", rateLimit(60_000, 30), async (req, res) => {
   }
 });
 
-// 4b. MCP Universal Endpoint — single key unlocks all connected toolkits (GET for discovery, POST for JSON-RPC)
-// Works with Claude Desktop, Cursor, and any MCP client via: https://yourdomain/api/fish/mcp?key=ak_live_xxx
-app.all("/api/fish/mcp", rateLimit(60_000, 60), async (req: any, res) => {
+/* FYSH_AGENT_MCP_V2 — نقطة مفتاح فيش الموحّد
+   تتحقق من مفتاح ak_live_… ثم تمرّر JSON-RPC إلى /api/agent/mcp،
+   فيعمل Claude Desktop وCursor وأي عميل MCP بمفتاح واحد. */
+
+function resolveFishKey(value: string) {
+  if (!value) return null;
+  const keyId = tokenIndex.get(value);
+  const record = keyId ? fyshApiKeysDatabase.get(keyId) : Array.from(fyshApiKeysDatabase.values()).find(k => k.token === value);
+  return record && record.status === "ACTIVE" ? record : null;
+}
+
+app.all("/api/fish/mcp", rateLimit(60_000, 120), async (req: any, res) => {
+  const requestId = req.body?.id ?? null;
   try {
     const rawHeader = req.headers["x-api-key"] || req.headers["authorization"];
-    const headerToken = typeof rawHeader === "string" ? rawHeader.replace(/^Bearer\s+/i, "") : null;
-    const token = (req.query?.key as string) || (req.query?.apiKey as string) || headerToken || req.body?.apiKey;
-    if (!token) {
-      return res.status(401).json({ error: "Missing FYSH API Key. Use ?key=ak_live_... or header x-api-key" });
+    const headerValue = typeof rawHeader === "string" ? rawHeader.replace(/^Bearer\s+/i, "") : null;
+    const incoming = String(req.query?.key || req.query?.apiKey || headerValue || req.body?.apiKey || "").trim();
+    const record = resolveFishKey(incoming);
+    if (!record) {
+      return res.status(401).json({ jsonrpc: "2.0", id: requestId, error: { code: -32001, message: "Invalid or missing FYSH API key" } });
     }
-    let keyRecord = tokenIndex.get(token) ? fyshApiKeysDatabase.get(tokenIndex.get(token)!) : Array.from(fyshApiKeysDatabase.values()).find(k => k.token === token && k.status === "ACTIVE");
-    if (!keyRecord || keyRecord.status !== "ACTIVE") {
-      return res.status(401).json({ error: "Invalid or revoked FYSH API Key" });
-    }
-    const composioUserId = normalizeFishUserId(keyRecord.userId);
-    // Return MCP discovery info on GET
+
+    record.lastUsedAt = new Date().toISOString();
+    fyshApiKeysDatabase.set(record.id, record);
+    persistKeysToDisk();
+
+    const connections = await loadUserConnectionsSafe(record.userId);
+    const toolkits = activeToolkitSlugs(connections.accounts);
+    const base = `${req.get("x-forwarded-proto") || req.protocol}://${req.get("x-forwarded-host") || req.get("host")}`;
+    const selfUrl = `${base}/api/fish/mcp?key=${incoming}`;
+    const agentUrl = `${base}/api/agent/mcp?userId=${encodeURIComponent(rawFishId(record.userId))}`;
+
     if (req.method === "GET") {
-      let active: any[] = [];
-      try {
-        const composio = getComposio();
-        const list: any = await composio.connectedAccounts.list({ userIds: [composioUserId], userUuid: composioUserId } as any);
-        const items = list?.items || (Array.isArray(list) ? list : []);
-        active = items.filter((a: any) => a.status === "ACTIVE" || a.status === "CONNECTED" || (!a.status && a.id));
-      } catch (e: any) {
-        // If COMPOSIO_API_KEY missing or API down, return empty but valid response — do not fail MCP discovery
-        if (e.message?.includes("COMPOSIO_API_KEY")) {
-          console.warn("[MCP] Composio not configured, returning empty toolkit list");
-        } else {
-          console.warn("[MCP] connectedAccounts.list failed", e.message);
-        }
-        active = [];
-      }
       return res.json({
         protocol: "mcp",
-        version: "1.0",
-        fyshUserId: keyRecord.userId,
-        composioUserId,
-        keyName: keyRecord.name,
-        connectedToolkits: active.map((a: any) => a.toolkit || a.app || a.toolkitSlug),
-        connectedCount: active.length,
-        mcpUrl: `${req.protocol}://${req.get("host")}/api/fish/mcp?key=${token}`,
+        transport: "http-sse",
+        status: toolkits.length > 0 ? "ready" : "no_connections",
+        keyName: record.name,
+        fyshUserId: rawFishId(record.userId),
+        connectedToolkits: toolkits,
+        connectedCount: connections.active.length,
+        mcpUrl: selfUrl,
         usage: {
-          claude_desktop: `Add to claude_desktop_config.json -> mcpServers.fysh.args = ["-y","@composio/mcp@latest","--api-key","${token}"]`,
-          cursor: `Cursor Settings -> MCP -> Add Server -> URL: ${req.protocol}://${req.get("host")}/api/fish/mcp?key=${token}`,
-          curl: `curl -H "x-api-key: ${token}" ${req.protocol}://${req.get("host")}/api/fish/mcp`
-        }
+          claude_desktop: {
+            file: "claude_desktop_config.json",
+            snippet: { mcpServers: { fysh: { type: "http", url: selfUrl } } },
+          },
+          cursor: { step: "Settings → MCP → Add new MCP server (type: http)", url: selfUrl },
+          chatgpt_connector: { type: "MCP (streamable HTTP)", url: selfUrl },
+          test: `curl -X POST "${selfUrl}" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+        },
       });
     }
-    // JSON-RPC passthrough for MCP clients (POST)
-    try {
-      const composio = getComposio();
-      const session = await composio.create(composioUserId);
-      const tools = await session.tools();
-      return res.json({ jsonrpc: "2.0", id: (req.body as any)?.id || 1, result: { tools, composioUserId, keyName: keyRecord.name } });
-    } catch (e: any) {
-      return res.status(503).json({ error: "Composio not configured or unavailable", detail: e.message });
+
+    if (toolkits.length === 0) {
+      return res.json({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32002, message: "No connected apps for this FYSH key. Connect an app in /apps first." },
+      });
     }
-  } catch (e: any) {
-    return res.status(500).json({ error: e.message });
+
+    const upstream = await fetch(agentUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": String(req.headers["accept"] || "application/json, text/event-stream"),
+      },
+      body: JSON.stringify(req.body || {}),
+    });
+
+    const upstreamType = upstream.headers.get("content-type") || "application/json";
+    res.status(upstream.status);
+    res.setHeader("Content-Type", upstreamType);
+    if (upstreamType.includes("text/event-stream")) res.setHeader("Cache-Control", "no-cache");
+    console.log(`[FYSH_MCP] method=${req.body?.method} status=${upstream.status} user=${rawFishId(record.userId)} toolkits=${toolkits.length}`);
+    return res.send(await upstream.text());
+  } catch (error: any) {
+    console.error("[/api/fish/mcp] error:", error?.message);
+    return res.status(500).json({ jsonrpc: "2.0", id: requestId, error: { code: -32603, message: error?.message || "MCP proxy failed" } });
   }
 });
 
@@ -1844,7 +1845,7 @@ app.post("/api/fish/v1/execute", rateLimit(60_000, 30), async (req, res) => {
     persistKeysToDisk();
 
     const resolvedUserId = keyRecord.userId;
-    const composioUserId = `fish_user_${resolvedUserId}`;
+    const composioUserId = canonicalFishUserId(resolvedUserId);
 
     const composio = getComposio();
     const ai = getGemini();
@@ -1899,7 +1900,7 @@ app.post("/api/test/run-agent", async (req, res) => {
 
     const composio = getComposio();
     const ai = getGemini();
-    const composioUserId = `fish_user_${resolvedUserId}`;
+    const composioUserId = canonicalFishUserId(resolvedUserId);
 
     // Step 1: Check account status
     let isOAuthValid = false;
@@ -2003,7 +2004,7 @@ app.post("/api/fish/agent", rateLimit(60_000, 20), async (req, res) => {
 
     const composio = getComposio();
     const ai = getGemini();
-    const composioUserId = `fish_user_${fishUserId}`;
+    const composioUserId = canonicalFishUserId(fishUserId);
 
     // Step 2 & 3: Check status using composio.connectedAccounts.list({ userIds: [composioUserId] })
     let isOAuthValid = false;

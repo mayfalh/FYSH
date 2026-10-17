@@ -231,6 +231,15 @@ export function UserSettingsModal({
     const uid = getOrCreateStableFishUserId(firebaseUser?.uid);
     
     const result = await initiateComposioConnect(app, uid);
+    if (result.success && result.alreadyConnected) {
+      setConnectingAppId(null);
+      setFeedbackMsg({
+        type: 'success',
+        text: lang === 'ar' ? `${app.nameAr || app.name} مرتبط بالفعل` : `${app.name} is already connected`
+      });
+      setTimeout(() => setFeedbackMsg(null), 3000);
+      return;
+    }
     if (!result.success || !result.redirectUrl) {
       setConnectingAppId(null);
       setFeedbackMsg({

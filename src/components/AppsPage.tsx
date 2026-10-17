@@ -93,7 +93,7 @@ export function AppsPage({
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
 
   // Connection process states
-  const [connectionStates, setConnectionStates] = useState<Record<string, 'IDLE' | 'CONNECTING' | 'CONNECTED' | 'FAILED'>>({});
+  const [connectionStates, setConnectionStates] = useState<Record<string, 'IDLE' | 'CONNECTING' | 'CONNECTED' | 'FAILED' | 'RECONNECT'>>({});
   const [errorMsg, setErrorMsg] = useState<{ id?: string; message: string } | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   
@@ -310,6 +310,19 @@ export function AppsPage({
     });
   }, [connectedAccounts]);
 
+  // حسابات انتهت صلاحيتها: نطلب إعادة الربط بدل إظهار التطبيق كأنه غير مرتبط
+  const getReconnectAccount = useCallback((app: AppItem) => {
+    const slug = (app.composioSlug || app.id).toLowerCase().trim().replace(/[-_]/g, '');
+    const appName = app.name.toLowerCase().trim().replace(/[-_]/g, '');
+
+    return connectedAccounts.find(acc => {
+      if (!acc.needsReconnect) return false;
+      const accSlug = (acc.toolkitSlug || acc.toolkit || acc.appSlug || '').toLowerCase().trim().replace(/[-_]/g, '');
+      const accName = (acc.appName || '').toLowerCase().trim().replace(/[-_]/g, '');
+      return (accSlug && accSlug === slug) || (accName && accName === appName);
+    });
+  }, [connectedAccounts]);
+
   // Trigger app connection
   const handleConnectApp = async (app: AppItem, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -327,6 +340,7 @@ export function AppsPage({
     try {
       const fishUserId = auth.currentUser?.uid || getOrCreateStableFishUserId();
       const slug = app.composioSlug || app.id;
+      const reconnectAcc = getReconnectAccount(app);
       
       const res = await fetch('/api/composio/connect', {
         method: 'POST',
@@ -337,6 +351,9 @@ export function AppsPage({
           appSlug: slug,
           appName: app.name,
           fishUserId: fishUserId,
+          // إعادة الربط تُجبر إنشاء رابط جديد حتى لو وُجد حساب قديم منتهي
+          force: !!reconnectAcc,
+          callbackUrl: `${window.location.origin}/api/composio/callback`,
         })
       });
 
@@ -344,6 +361,15 @@ export function AppsPage({
 
       if (!res.ok || data.error) {
         throw new Error(data.error || 'Failed to initiate authorization');
+      }
+
+      if (data.alreadyConnected) {
+        setConnectionStates(prev => ({ ...prev, [appId]: 'CONNECTED' }));
+        await fetchConnectedAccounts();
+        window.dispatchEvent(new CustomEvent('fysh:connected_accounts_changed'));
+        setSuccessMsg(lang === 'ar' ? `${app.nameAr || app.name} مرتبط بالفعل` : `${app.name} is already connected`);
+        setTimeout(() => setSuccessMsg(null), 4000);
+        return;
       }
 
       if (data.redirectUrl || data.oauthUrl || data.connectUrl || data.url) {
@@ -368,11 +394,15 @@ export function AppsPage({
           }
         }, 1200);
       } else {
-        setConnectionStates(prev => ({ ...prev, [appId]: 'CONNECTED' }));
-        fetchConnectedAccounts();
-        window.dispatchEvent(new CustomEvent('fysh:connected_accounts_changed'));
-        setSuccessMsg(lang === 'ar' ? `تم ربط ${app.nameAr || app.name} بنجاح!` : `${app.name} connected successfully!`);
-        setTimeout(() => setSuccessMsg(null), 4000);
+        // لا يوجد رابط تفويض: نعرض سببًا واضحًا بدل رسالة نجاح كاذبة.
+        setConnectionStates(prev => ({ ...prev, [appId]: 'IDLE' }));
+        await fetchConnectedAccounts();
+        setErrorMsg(
+          lang === 'ar'
+            ? `لم يرجع الخادم رابط تفويض لـ ${app.nameAr || app.name}. تأكد من إعداد مفتاح Composio على السيرفر ثم أعد المحاولة.`
+            : `The server did not return an authorization link for ${app.name}. Check the Composio key on the server and retry.`
+        );
+        setTimeout(() => setErrorMsg(null), 8000);
       }
     } catch (err: any) {
       console.error("Connect error", err);
@@ -943,6 +973,7 @@ export function AppsPage({
             {filteredAndSortedApps.map((app) => {
               const connectedAcc = getConnectedAccount(app);
               const isConnected = !!connectedAcc;
+              const reconnectAcc = !isConnected ? getReconnectAccount(app) : undefined;
               const appState = connectionStates[app.id] || (isConnected ? 'CONNECTED' : 'IDLE');
               const isConnecting = appState === 'CONNECTING';
               const isBuiltIn = !!app.isBuiltInActive;
@@ -1010,6 +1041,20 @@ export function AppsPage({
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                    ) : reconnectAcc ? (
+                      <button
+                        onClick={(e) => handleConnectApp(app, e)}
+                        disabled={isConnecting}
+                        title={reconnectAcc.statusReason || (lang === 'ar' ? 'انتهت صلاحية الربط، يلزم إعادة التصريح' : 'Connection expired, re-authorization required')}
+                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition-all flex items-center gap-1 cursor-pointer"
+                      >
+                        {isConnecting ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <AlertCircle className="w-3 h-3" />
+                        )}
+                        <span>{lang === 'ar' ? 'أعد الربط' : 'Reconnect'}</span>
+                      </button>
                     ) : (
                       <button
                         onClick={(e) => handleConnectApp(app, e)}
@@ -1042,6 +1087,7 @@ export function AppsPage({
               {filteredAndSortedApps.map((app) => {
                 const connectedAcc = getConnectedAccount(app);
                 const isConnected = !!connectedAcc;
+                const reconnectAcc = !isConnected ? getReconnectAccount(app) : undefined;
                 const appState = connectionStates[app.id] || (isConnected ? 'CONNECTED' : 'IDLE');
                 const isConnecting = appState === 'CONNECTING';
                 const isBuiltIn = !!app.isBuiltInActive;
@@ -1063,6 +1109,8 @@ export function AppsPage({
                         className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white border flex items-center justify-center p-3 sm:p-3.5 transition-all duration-200 shadow-2xs group-hover:scale-105 group-hover:shadow-md ${
                           isConnected || isBuiltIn
                             ? 'border-emerald-300 ring-2 ring-emerald-500/20'
+                            : reconnectAcc
+                            ? 'border-amber-300 ring-2 ring-amber-500/20'
                             : 'border-gray-200/90 group-hover:border-gray-400'
                         }`}
                       >
@@ -1094,6 +1142,8 @@ export function AppsPage({
                             ? (lang === 'ar' ? 'إلغاء الربط' : 'Disconnect')
                             : isBuiltIn
                             ? (lang === 'ar' ? 'نشط تلقائياً' : 'Built-in Active')
+                            : reconnectAcc
+                            ? (lang === 'ar' ? 'انتهت صلاحية الربط — أعد الربط' : 'Connection expired — reconnect')
                             : (lang === 'ar' ? 'ربط التطبيق' : 'Connect')
                         }
                         className={`absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full flex items-center justify-center text-white ring-2 ring-white shadow-xs transition-transform duration-150 hover:scale-115 active:scale-95 cursor-pointer z-10 ${
@@ -1103,6 +1153,8 @@ export function AppsPage({
                             ? 'bg-black hover:bg-red-600'
                             : isBuiltIn
                             ? 'bg-emerald-600'
+                            : reconnectAcc
+                            ? 'bg-amber-500 hover:bg-amber-600'
                             : 'bg-black hover:bg-gray-800'
                         }`}
                       >
@@ -1112,6 +1164,8 @@ export function AppsPage({
                           <Minus className="w-3 h-3 text-white stroke-[2.5]" />
                         ) : isBuiltIn ? (
                           <Check className="w-2.5 h-2.5 text-white stroke-[2.5]" />
+                        ) : reconnectAcc ? (
+                          <AlertCircle className="w-3 h-3 text-white stroke-[2.5]" />
                         ) : (
                           <Plus className="w-3 h-3 text-white stroke-[2.5]" />
                         )}
