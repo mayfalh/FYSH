@@ -474,12 +474,22 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
 
   try {
     console.log("[COMPOSIO] Fetching toolkits from Composio API v3.1...");
-    let page = 1;
     const allToolkits: any[] = [];
+    const seenSlugs = new Set<string>();
     let totalItems = 0;
+    let cursor: string | undefined;
+    let page = 1;
+    const MAX_PAGES = 20;
 
-    while (page <= 8) {
-      const res = await fetch(`https://backend.composio.dev/api/v3.1/toolkits?limit=250&page=${page}`, {
+    // Composio v3.1 paginates with an opaque `cursor` (not `page`). Asking for
+    // `page=2` returns page 1 again, which used to leave the catalog stuck at
+    // the first 250 toolkits. Follow `next_cursor` until it is exhausted.
+    while (page <= MAX_PAGES) {
+      const catalogUrl = new URL("https://backend.composio.dev/api/v3.1/toolkits");
+      catalogUrl.searchParams.set("limit", "1000");
+      if (cursor) catalogUrl.searchParams.set("cursor", cursor);
+
+      const res = await fetch(catalogUrl.toString(), {
         headers: { 'x-api-key': apiKey }
       });
 
@@ -496,6 +506,9 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
 
       totalItems = json.total_items || totalItems;
       for (const item of items) {
+        if (!item?.slug || seenSlugs.has(item.slug)) continue;
+        seenSlugs.add(item.slug);
+
         const rawCategory = item.meta?.categories?.[0]?.name || item.meta?.categories?.[0]?.id || item.category || '';
         const mappedCat = mapComposioCategory(rawCategory);
         const logo = item.meta?.logo || `https://logos.composio.dev/api/${item.slug}`;
@@ -514,9 +527,9 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
         });
       }
 
-      if (!json.next_cursor && page >= (json.total_pages || 1)) {
-        break;
-      }
+      const nextCursor = json.next_cursor;
+      if (!nextCursor || nextCursor === cursor) break;
+      cursor = nextCursor;
       page++;
     }
 
