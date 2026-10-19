@@ -303,14 +303,30 @@ function normalizeAuthConfig(item: any): AuthConfigItem {
 let authConfigCache: { at: number; items: AuthConfigItem[] } | null = null;
 const AUTH_CONFIG_TTL_MS = 5 * 60 * 1000;
 
-export async function listAuthConfigs(projectKey: string, force = false): Promise<AuthConfigItem[]> {
-  if (!force && authConfigCache && Date.now() - authConfigCache.at < AUTH_CONFIG_TTL_MS) {
+export async function listAuthConfigs(
+  projectKey: string,
+  force = false,
+  toolkitSlug?: string
+): Promise<AuthConfigItem[]> {
+  if (!toolkitSlug && !force && authConfigCache && Date.now() - authConfigCache.at < AUTH_CONFIG_TTL_MS) {
     return authConfigCache.items;
   }
-  const data = await composioFetch(projectKey, "/auth_configs?limit=200");
-  const items: any[] = data.items || (Array.isArray(data) ? data : []);
+
+  // The project can have thousands of auth configs after enabling the full
+  // Composio catalog. Fetch every page instead of silently stopping at 200.
+  let cursor: string | undefined;
+  const items: any[] = [];
+  do {
+    const params = new URLSearchParams({ limit: "200" });
+    if (toolkitSlug) params.set("toolkit_slug", toolkitSlug);
+    if (cursor) params.set("cursor", cursor);
+    const data = await composioFetch(projectKey, `/auth_configs?${params.toString()}`);
+    items.push(...(data.items || (Array.isArray(data) ? data : [])));
+    cursor = data.next_cursor || undefined;
+  } while (cursor);
+
   const normalized = items.map(normalizeAuthConfig).filter(a => a.id);
-  authConfigCache = { at: Date.now(), items: normalized };
+  if (!toolkitSlug) authConfigCache = { at: Date.now(), items: normalized };
   return normalized;
 }
 
@@ -330,7 +346,7 @@ export async function resolveAuthConfigId(
   const slug = (toolkitSlug || "").trim();
   if (!slug) throw new ComposioApiError("Toolkit slug is required to resolve an auth config", 400);
 
-  const configs = await listAuthConfigs(projectKey);
+  const configs = await listAuthConfigs(projectKey, true, slug);
   const matches = configs.filter(c => c.toolkitSlug === slug);
   const enabled = matches.filter(c => (c.status || "ENABLED").toUpperCase() === "ENABLED");
   const preferred = enabled.find(c => c.isEnabledForToolRouter !== false) || enabled[0] || matches[0];
@@ -343,17 +359,30 @@ export async function resolveAuthConfigId(
   }
 
   log(`[composio] no auth config for ${slug} — creating a Composio-managed one`);
-  const created = await composioFetch(projectKey, "/auth_configs", {
-    method: "POST",
-    body: {
-      toolkit: { slug },
-      auth_config: {
-        type: "use_composio_managed_auth",
-        credentials: {},
-        restrict_to_following_tools: [],
+  let created: any;
+  try {
+    created = await composioFetch(projectKey, "/auth_configs", {
+      method: "POST",
+      body: {
+        toolkit: { slug },
+        auth_config: {
+          type: "use_composio_managed_auth",
+          credentials: {},
+          restrict_to_following_tools: [],
+        },
       },
-    },
-  });
+    });
+  } catch (err: any) {
+    const slugCode = err?.body?.error?.slug;
+    if (slugCode === "Auth_Config_DefaultAuthConfigNotFound" || String(err?.message || "").includes("does not have managed credentials")) {
+      throw new ComposioApiError(
+        langSafeOauthMessage(slug),
+        409,
+        err?.body
+      );
+    }
+    throw err;
+  }
   const id = created?.id || created?.auth_config?.id || created?.nanoid;
   if (!id) {
     throw new ComposioApiError(`Composio did not return an auth config id for ${slug}`, 502, created);
@@ -361,6 +390,10 @@ export async function resolveAuthConfigId(
   authConfigCache = null; // invalidate
   log(`[composio] auth config ${id} created for ${slug}`);
   return id;
+}
+
+function langSafeOauthMessage(slug: string): string {
+  return `هذا التطبيق (${slug}) يحتاج بيانات OAuth خاصة مثل Client ID وClient Secret تُضاف من لوحة Composio قبل الربط. This app needs its own OAuth credentials.`;
 }
 
 /* ------------------------------------------------------------------ */

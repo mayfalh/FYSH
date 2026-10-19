@@ -38,8 +38,42 @@ export function GlobalSearchModal({
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | 'apps' | 'agents' | 'platform'>('all');
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [catalogApps, setCatalogApps] = useState<AppItem[]>(ALL_COMPOSIO_APPS);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Load the full Composio catalog so Cmd+K can find all 1,600+ apps, not just
+  // the curated static list.
+  useEffect(() => {
+    if (!isOpen || catalogLoaded) return;
+    let mounted = true;
+    fetch('/api/composio/toolkits')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!mounted || !data?.toolkits) return;
+        const merged = [...ALL_COMPOSIO_APPS];
+        const known = new Set(merged.map(a => (a.composioSlug || a.id).toLowerCase().replace(/[^a-z0-9]/g, '')));
+        data.toolkits.forEach((t: any) => {
+          const key = String(t.slug || t.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (!key || known.has(key)) return;
+          known.add(key);
+          merged.push({
+            id: t.slug || t.id,
+            name: t.name || t.slug,
+            category: (t.category || 'Developer & DevOps') as AppItem['category'],
+            logo: t.logo || `https://logos.composio.dev/api/${t.slug}`,
+            verified: t.verified ?? true,
+            composioSlug: t.slug || t.id,
+            description: t.description || '',
+          });
+        });
+        setCatalogApps(merged);
+        setCatalogLoaded(true);
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, [isOpen, catalogLoaded]);
 
   useEffect(() => {
     if (isOpen) {
@@ -71,7 +105,7 @@ export function GlobalSearchModal({
     const q = query.toLowerCase().trim();
 
     // 1. Apps matching
-    const matchingApps = ALL_COMPOSIO_APPS.filter(app => {
+    const matchingApps = catalogApps.filter(app => {
       if (!q) return true;
       return (
         app.name.toLowerCase().includes(q) ||
@@ -136,7 +170,7 @@ export function GlobalSearchModal({
       {
         type: 'platform' as const,
         id: 'platform-apps',
-        title: lang === 'ar' ? 'كتالوج التطبيقات وMCP (180+ تطبيق)' : 'Apps & MCP Catalog (180+ Apps)',
+        title: lang === 'ar' ? 'كتالوج التطبيقات وMCP (+1,600 تطبيق)' : 'Apps & MCP Catalog (1,600+ Apps)',
         subtitle: lang === 'ar' ? 'ربط التطبيقات وخوادم MCP المخصصة' : 'Connect SaaS tools & Custom MCP Servers',
         description: lang === 'ar' ? 'تصفح كافة التطبيقات وتصنيفاتها وربط الحسابات' : 'Browse all toolkits and categories',
         route: 'apps'
@@ -174,12 +208,12 @@ export function GlobalSearchModal({
       );
     });
 
-    if (activeFilter === 'apps') return matchingApps;
+    if (activeFilter === 'apps') return matchingApps.slice(0, 100);
     if (activeFilter === 'agents') return matchingAgents;
     if (activeFilter === 'platform') return platformSections;
 
-    return [...platformSections, ...matchingAgents.slice(0, 8), ...matchingApps];
-  }, [query, activeFilter, lang]);
+    return [...platformSections, ...matchingAgents.slice(0, 8), ...matchingApps.slice(0, 50)];
+  }, [query, activeFilter, lang, catalogApps]);
 
   const handleSelect = (item: any) => {
     onClose();
@@ -376,8 +410,8 @@ export function GlobalSearchModal({
         <div className="px-4 py-2.5 bg-gray-50 border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">
           <span>
             {lang === 'ar' 
-              ? `إجمالي التطبيقات والوكلاء: ${ALL_COMPOSIO_APPS.length}+ أداة متصلة`
-              : `Total ecosystem: ${ALL_COMPOSIO_APPS.length}+ connected tools & agents`}
+              ? 'إجمالي التطبيقات والوكلاء: +1,600 أداة متصلة'
+              : 'Total ecosystem: 1,600+ connected tools & agents'}
           </span>
           <div className="flex items-center gap-2">
             <span>{lang === 'ar' ? 'اضغط للفتح' : 'Click to open'}</span>

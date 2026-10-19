@@ -295,7 +295,9 @@ export function mapToolkitToComposioSlug(toolkitId: string): string {
   };
 
   if (mapping[clean]) return mapping[clean];
-  return clean.replace(/[-_]/g, '');
+  // Preserve Composio's underscore-based slugs (e.g. zoho_invoice,
+  // better_stack). Only convert kebab-case UI ids to underscores.
+  return clean.replace(/-/g, '_');
 }
 
 // Setup Fish User Agent with Composio MCP
@@ -522,6 +524,7 @@ export async function fetchFullComposioCatalog(): Promise<any[]> {
           description: item.meta?.description || `${item.name} integration via Composio MCP.`,
           logo,
           verified: item.is_local_toolkit === false,
+          isBuiltInActive: Boolean(item.no_auth) || (item.auth_schemes || []).includes("NO_AUTH"),
           authSchemes: item.auth_schemes || [],
           composioManaged: item.composio_managed_auth_schemes || []
         });
@@ -771,7 +774,7 @@ app.post("/api/composio/connect", rateLimit(60_000, 20), async (req, res) => {
       });
     } catch (linkErr: any) {
       console.warn(`[COMPOSIO] link creation failed for ${toolkitSlug}: ${linkErr?.message}`);
-      if (linkErr instanceof ComposioApiError && [400, 404, 422].includes(linkErr.status)) {
+      if (linkErr instanceof ComposioApiError && [400, 404, 409, 422].includes(linkErr.status)) {
         return res.status(linkErr.status).json({
           success: false,
           error: `تعذّر تجهيز الربط لـ ${toolkitSlug}: ${linkErr.message}`,

@@ -368,13 +368,6 @@ export function Sections({ lang, onOpenLogin, onExploreApps, onNavigateToAgents 
           </div>
         )}
 
-        {/* Agent Integration Gateway & Mini Dashboard */}
-        <AgentDashboardSection 
-          lang={lang} 
-          onNavigateToAgents={onNavigateToAgents} 
-          onExploreApps={onExploreApps} 
-        />
-
         {/* Banner Alert Messages */}
         {errorMsg && (
           <div className="mb-6 p-3.5 sm:p-4 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl flex items-center justify-between">
@@ -501,11 +494,19 @@ export function Sections({ lang, onOpenLogin, onExploreApps, onNavigateToAgents 
               onClick={onExploreApps}
               className="px-6 py-3 bg-[#191919] hover:bg-[#8B0000] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-md hover:shadow-lg transition-all duration-200 flex items-center gap-2 cursor-pointer group"
             >
-              <span>{lang === 'ar' ? 'عرض جميع التطبيقات (+1300 تطبيق)' : 'More Apps (+1300 Apps)'}</span>
+              <span>{lang === 'ar' ? 'عرض جميع التطبيقات (+1600 تطبيق)' : 'More Apps (+1600 Apps)'}</span>
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </button>
           </div>
         )}
+
+        {/* Agent Integration Gateway — placed after the app connection grid so
+            visitors connect an app first, then connect their agent. */}
+        <AgentDashboardSection 
+          lang={lang} 
+          onNavigateToAgents={onNavigateToAgents} 
+          onExploreApps={onExploreApps} 
+        />
 
         <div className="mt-6 p-6 sm:p-8 bg-[#F4F3F3] rounded-2xl flex flex-col md:flex-row items-center justify-between gap-4 sm:gap-6 border border-gray-200">
           <div>

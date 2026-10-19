@@ -74,6 +74,7 @@ export function AppsPage({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<AppCategory>('All');
   const [viewMode, setViewMode] = useState<'grid' | 'cards'>('grid');
+  const [visibleCount, setVisibleCount] = useState(150);
 
   // Sort & Show Dropdown states (Matching user screenshot)
   const [isViewDropdownOpen, setIsViewDropdownOpen] = useState(false);
@@ -195,7 +196,7 @@ export function AppsPage({
                   category: cat,
                   logo: t.logo || `https://logos.composio.dev/api/${rawSlug}`,
                   verified: t.verified ?? true,
-                  isBuiltInActive: false,
+                  isBuiltInActive: Boolean(t.isBuiltInActive || t.no_auth),
                   composioSlug: rawSlug,
                   description: t.description || `${rawName} integration via Composio MCP.`,
                   popularityRank: 999
@@ -577,6 +578,16 @@ export function AppsPage({
     });
   }, [combinedApps, searchQuery, selectedCategory, activeTab, showOption, sortOption, getConnectedAccount, lang]);
 
+  // Render in batches so a 1,600+ app catalog stays fast on modest devices.
+  useEffect(() => {
+    setVisibleCount(150);
+  }, [searchQuery, selectedCategory, activeTab, showOption, sortOption]);
+
+  const visibleApps = useMemo(
+    () => filteredAndSortedApps.slice(0, visibleCount),
+    [filteredAndSortedApps, visibleCount]
+  );
+
   const connectedCount = useMemo(() => {
     return combinedApps.filter(app => !!getConnectedAccount(app)).length;
   }, [combinedApps, getConnectedAccount]);
@@ -749,7 +760,7 @@ export function AppsPage({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={lang === 'ar' ? 'بحث في أكثر من 300 تطبيق وخادم MCP...' : 'Search 300+ apps & MCP servers...'}
+              placeholder={lang === 'ar' ? 'بحث في أكثر من 1,600 تطبيق وخادم MCP...' : 'Search 1,600+ apps & MCP servers...'}
               className={`w-full ${lang === 'ar' ? 'pr-9 pl-8 text-right' : 'pl-9 pr-8 text-left'} py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 shadow-2xs transition-all`}
             />
             {searchQuery && (
@@ -901,6 +912,29 @@ export function AppsPage({
           </div>
         </div>
 
+        {/* Simple 3-step guide for non-technical users */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-5" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+          {[
+            { n: '1', ar: 'اختر التطبيق', en: 'Choose an app' },
+            { n: '2', ar: 'اضغط «ربط التطبيق»', en: 'Click “Connect”' },
+            { n: '3', ar: 'أكمل تسجيل الدخول أو أدخل المفتاح', en: 'Sign in or enter the key' },
+          ].map((step) => (
+            <div key={step.n} className="flex items-center gap-2.5 rounded-xl border border-gray-200/80 bg-white px-3.5 py-2.5 shadow-2xs">
+              <span className="w-6 h-6 rounded-full bg-[#8B0000] text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                {step.n}
+              </span>
+              <span className="text-[11px] sm:text-xs font-medium text-gray-700">
+                {lang === 'ar' ? step.ar : step.en}
+              </span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[11px] text-gray-500 mb-5 -mt-2" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+          {lang === 'ar'
+            ? 'الربط يتم بموافقتك عبر Composio، ولا نطّلع على كلمة مرورك. بعض التطبيقات تطلب مفتاح API خاصاً بك.'
+            : 'Connecting happens with your consent via Composio; we never see your password. Some apps ask for your own API key.'}
+        </p>
+
         {/* Category Pills Bar: "All", then "Communication" right after, followed by other categories */}
         <div className="mb-6 flex items-center gap-1.5 overflow-x-auto pb-2 scrollbar-none border-b border-gray-200/80 pt-1">
           {APPS_CATEGORIES.map((category) => {
@@ -970,7 +1004,7 @@ export function AppsPage({
         ) : viewMode === 'cards' ? (
           /* Detailed 3-Column Card Layout */
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-            {filteredAndSortedApps.map((app) => {
+            {visibleApps.map((app) => {
               const connectedAcc = getConnectedAccount(app);
               const isConnected = !!connectedAcc;
               const reconnectAcc = !isConnected ? getReconnectAccount(app) : undefined;
@@ -1084,7 +1118,7 @@ export function AppsPage({
           /* Compact Circular Icon Grid Layout (Matching Platform Identity) */
           <div className="bg-white rounded-2xl border border-gray-200/90 p-6 sm:p-8 shadow-2xs">
             <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 xl:grid-cols-12 gap-x-4 gap-y-7 sm:gap-x-6 sm:gap-y-9 justify-items-center">
-              {filteredAndSortedApps.map((app) => {
+              {visibleApps.map((app) => {
                 const connectedAcc = getConnectedAccount(app);
                 const isConnected = !!connectedAcc;
                 const reconnectAcc = !isConnected ? getReconnectAccount(app) : undefined;
@@ -1180,6 +1214,19 @@ export function AppsPage({
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {filteredAndSortedApps.length > visibleCount && (
+          <div className="flex justify-center mt-7">
+            <button
+              onClick={() => setVisibleCount(c => c + 150)}
+              className="px-6 py-2.5 bg-white hover:bg-gray-50 text-gray-800 text-xs sm:text-sm font-semibold rounded-xl border border-gray-300 shadow-2xs transition-colors cursor-pointer"
+            >
+              {lang === 'ar'
+                ? `عرض المزيد (${filteredAndSortedApps.length - visibleCount} متبقي)`
+                : `Show more (${filteredAndSortedApps.length - visibleCount} left)`}
+            </button>
           </div>
         )}
       </main>
