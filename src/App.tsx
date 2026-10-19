@@ -133,6 +133,15 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // After a successful sign-in, close the login overlay and land on the home
+  // page — never on the apps/agents/account settings screens.
+  const handleLoginSuccess = () => {
+    setIsLoginOpen(false);
+    setCurrentRoute('home');
+    window.history.pushState(null, '', '/');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // Render standalone API Keys developer console if on /api-keys route
   if (currentRoute === 'api-keys') {
     return (
@@ -149,6 +158,7 @@ export default function App() {
         <SignalLoginModal
           isOpen={isLoginOpen}
           onClose={() => setIsLoginOpen(false)}
+          onLoginSuccess={handleLoginSuccess}
           lang={lang}
           isLoggedIn={isLoggedIn}
           setIsLoggedIn={setIsLoggedIn}
@@ -185,6 +195,7 @@ export default function App() {
         <SignalLoginModal
           isOpen={isLoginOpen}
           onClose={() => setIsLoginOpen(false)}
+          onLoginSuccess={handleLoginSuccess}
           lang={lang}
           isLoggedIn={isLoggedIn}
           setIsLoggedIn={setIsLoggedIn}
@@ -221,6 +232,7 @@ export default function App() {
         <SignalLoginModal
           isOpen={isLoginOpen}
           onClose={() => setIsLoginOpen(false)}
+          onLoginSuccess={handleLoginSuccess}
           lang={lang}
           isLoggedIn={isLoggedIn}
           setIsLoggedIn={setIsLoggedIn}
@@ -273,6 +285,7 @@ export default function App() {
       <SignalLoginModal
         isOpen={isLoginOpen}
         onClose={() => setIsLoginOpen(false)}
+        onLoginSuccess={handleLoginSuccess}
         lang={lang}
         isLoggedIn={isLoggedIn}
         setIsLoggedIn={setIsLoggedIn}

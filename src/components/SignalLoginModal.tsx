@@ -13,16 +13,20 @@ import { UserSettingsModal } from './UserSettingsModal';
 interface SignalLoginModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onLoginSuccess?: () => void;
   lang: Lang;
   isLoggedIn: boolean;
   setIsLoggedIn: (val: boolean) => void;
 }
 
-export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLoggedIn }: SignalLoginModalProps) {
+export function SignalLoginModal({ isOpen, onClose, onLoginSuccess, lang, isLoggedIn, setIsLoggedIn }: SignalLoginModalProps) {
   const currentT = t[lang];
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // After a successful sign-in we close the modal and return to the home page
+  // instead of immediately replacing it with the account/settings screen.
+  const [dismissAfterLogin, setDismissAfterLogin] = useState(false);
 
   // User Profile State (for when logged in)
   const [displayName, setDisplayName] = useState('');
@@ -78,6 +82,12 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
     return () => unsubscribe();
   }, [lang, setIsLoggedIn]);
 
+  // Re-opening the modal (e.g. from the "workspace" button) should show the
+  // account/settings screen again, not the post-login dismissal state.
+  useEffect(() => {
+    if (isOpen) setDismissAfterLogin(false);
+  }, [isOpen]);
+
   // قياس الشاشة: سطح المكتب يعرض التصميم كاملًا محجّمًا، والجوال تخطيط مبسّط
   const [viewport, setViewport] = useState({ w: 1440, h: 900 });
   useEffect(() => {
@@ -96,6 +106,7 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
   const handleGoogleLogin = async () => {
     setErrorMsg(null);
     setIsLoading(true);
+    setDismissAfterLogin(true);
     try {
       const user = await signInWithGoogle();
       if (user) {
@@ -105,8 +116,15 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
         if (user.photoURL) {
           setProfileImage(user.photoURL);
         }
+        // Close the login overlay and take the user to the home page.
+        if (onLoginSuccess) {
+          onLoginSuccess();
+        } else {
+          onClose();
+        }
       }
     } catch (error: any) {
+      setDismissAfterLogin(false);
       if (error?.code === 'auth/popup-closed-by-user') {
         // User voluntarily closed popup
       } else if (error?.code === 'auth/api-key-not-valid') {
@@ -185,7 +203,7 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
     }
   };
 
-  if (isLoggedIn) {
+  if (isLoggedIn && !dismissAfterLogin) {
     return (
       <UserSettingsModal
         isOpen={isOpen}
