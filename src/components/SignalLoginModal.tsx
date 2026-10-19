@@ -78,111 +78,18 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
     return () => unsubscribe();
   }, [lang, setIsLoggedIn]);
 
-  // Responsive layout engine for Signal Login
+  // قياس الشاشة: سطح المكتب يعرض التصميم كاملًا محجّمًا، والجوال تخطيط مبسّط
+  const [viewport, setViewport] = useState({ w: 1440, h: 900 });
   useEffect(() => {
-    if (!isOpen || isLoggedIn) return;
-
-    const REF_W = 1464, REF_H = 949, PHOTO_W = 836, PANE_W = 628, CARD_W = 613, CARD_H = 922;
-    const CONTENT_H = 697;
-    const PANE_RATIO = PANE_W / REF_W;
-    const HERO_W = 681, HERO_H = 219;
-    const RAMP_HI = 1280, RAMP_LO = 1000, PHOTO_MIN = 0.42;
-    const RAMP_LO2 = 820, PHOTO_MIN2 = 0.36;
-
-    const handleLayout = () => {
-      if (!stageRef.current) return;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const aspect = vw / vh;
-
-      const photoEl = photoRef.current;
-      const paneEl = paneRef.current;
-      const cardEl = cardRef.current;
-      const cardInEl = cardInRef.current;
-      const heroEl = heroRef.current;
-
-      if (!photoEl || !paneEl || !cardEl || !cardInEl || !heroEl) return;
-
-      // Clear inline hygiene
-      photoEl.style.cssText = '';
-      paneEl.style.cssText = '';
-      cardEl.style.cssText = '';
-      cardInEl.style.cssText = '';
-      heroEl.style.cssText = '';
-      document.body.classList.remove('tabport', 'stacked');
-
-      const isPhone = vw < 700;
-      const isPortrait = !isPhone && aspect < 51 / 50;
-
-      if (isPhone) {
-        document.body.classList.add('stacked');
-        return;
-      }
-
-      if (isPortrait) {
-        document.body.classList.add('tabport');
-        return;
-      }
-
-      // Mode A: Land (Landscape >= 700px)
-      let photoRatio = 1 - PANE_RATIO;
-      if (vw < RAMP_HI && vw >= RAMP_LO) {
-        const t = (vw - RAMP_LO) / (RAMP_HI - RAMP_LO);
-        photoRatio = PHOTO_MIN + t * ((1 - PANE_RATIO) - PHOTO_MIN);
-      } else if (vw < RAMP_LO && vw >= RAMP_LO2) {
-        const t = (vw - RAMP_LO2) / (RAMP_LO - RAMP_LO2);
-        photoRatio = PHOTO_MIN2 + t * (PHOTO_MIN - PHOTO_MIN2);
-      } else if (vw < RAMP_LO2) {
-        photoRatio = PHOTO_MIN2;
-      }
-
-      const photoW = vw * photoRatio;
-      const paneW = vw - photoW;
-
-      photoEl.style.width = `${photoRatio * 100}%`;
-      paneEl.style.left = `${photoRatio * 100}%`;
-
-      // placeCard
-      const cs = Math.min(paneW / PANE_W, vh / CONTENT_H);
-      const gapL = 1 * cs;
-      const mT = 14 * cs;
-      const mB = 13 * cs;
-      const mR = 14 * cs;
-      const cw = Math.max(CARD_W * cs, paneW - gapL - mR);
-      const ch = vh - mT - mB;
-
-      cardEl.style.left = `${gapL}px`;
-      cardEl.style.top = `${mT}px`;
-      cardEl.style.width = `${cw}px`;
-      cardEl.style.height = `${ch}px`;
-      cardEl.style.borderRadius = `${26 * cs}px`;
-      cardEl.style.borderWidth = `${Math.max(1, cs)}px`;
-
-      cardInEl.style.transform = `translate(${((cw - CARD_W * cs) / 2)}px, 0) scale(${cs})`;
-
-      // seatHero
-      const bandH = vh;
-      const imgScale = Math.max(photoW / 1177, bandH / 1336);
-      const s = Math.min(imgScale / (836 / 1177), photoW * 0.92 / HERO_W);
-      heroEl.style.transform = `scale(${s})`;
-      heroEl.style.transformOrigin = 'left bottom';
-      heroEl.style.bottom = '0px';
-      heroEl.style.left = '0px';
-      heroEl.style.width = `${HERO_W}px`;
-      heroEl.style.height = `${HERO_H}px`;
-    };
-
-    handleLayout();
-    window.addEventListener('resize', handleLayout);
-    window.addEventListener('orientationchange', handleLayout);
-
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    onResize();
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
     return () => {
-      window.removeEventListener('resize', handleLayout);
-      window.removeEventListener('orientationchange', handleLayout);
-      window.removeEventListener('orientationchange', handleLayout);
-      document.body.classList.remove('tabport', 'stacked');
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
     };
-  }, [isOpen, isLoggedIn]);
+  }, []);
 
   if (!isOpen) return null;
 
@@ -299,10 +206,77 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
     );
   }
 
+  const scale = Math.min(viewport.w / 1464, viewport.h / 949, 1);
+  const isCompact = viewport.w < 900;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
+    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm animate-fadeIn overflow-y-auto">
+
+      {isCompact && (
+        <div className="relative min-h-full w-full bg-[#fefefe] flex flex-col" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+          <button
+            onClick={onClose}
+            className="absolute top-4 right-4 z-20 text-gray-600 bg-white/90 backdrop-blur p-2 rounded-full shadow-md"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+
+          <div className="relative w-full h-[210px] bg-[#111] overflow-hidden">
+            <video className="w-full h-full object-cover" autoPlay muted loop playsInline preload="auto" crossOrigin="anonymous">
+              <source src="https://res.cloudinary.com/dd3as4ova/video/upload/v1787375509/Applications_emerging_from_FYSH___202608211518_r3xeec.mp4" type="video/mp4" />
+            </video>
+            <div className="absolute inset-0 bg-gradient-to-t from-[#fefefe] via-[#fefefe]/10 to-transparent" />
+          </div>
+
+          <div className="relative -mt-6 flex-1 rounded-t-[28px] bg-[#fefefe] px-6 pb-8 pt-8">
+            <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-[#2c3343]">
+              {lang === 'ar' ? 'مرحباً بك في فيش' : 'Welcome to FYSH'}
+            </h1>
+            <p className="mt-2 text-[14.5px] leading-relaxed text-[#797979]">
+              {lang === 'ar'
+                ? 'سجّل الدخول بحساب Google للوصول إلى أدوات الربط والوكلاء الذكيين.'
+                : 'Sign in with your Google account to manage toolkits, workflows, and AI agents.'}
+            </p>
+
+            <button
+              type="button"
+              disabled={isLoading}
+              onClick={handleGoogleLogin}
+              className="mt-6 w-full h-[56px] border-[1.5px] border-[#c8c8ca] rounded-full bg-white shadow-[0_2px_8px_rgba(0,0,0,0.06)] flex items-center justify-center gap-3 active:scale-[0.99] transition-all disabled:opacity-60"
+            >
+              <svg className="w-[22px] h-[22px] shrink-0" viewBox="0 0 48 48">
+                        <path fill="#EA4335" d="M24 9.5c3.54 0 6.7 1.22 9.19 3.61l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.44-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.28-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24s.92 7.54 2.56 10.78l7.97-6.19z"/>
+                        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.46-10.41l-7.97 6.19C6.51 42.62 14.62 48 24 48z"/>
+                      </svg>
+              <span className="text-[15px] font-medium text-[#232424]">
+                {isLoading ? (lang === 'ar' ? 'جاري الاتصال بـ Google...' : 'Connecting...') : (lang === 'ar' ? 'المتابعة باستخدام Google' : 'Continue with Google')}
+              </span>
+            </button>
+
+            {errorMsg && (
+              <div className="mt-4 p-3.5 bg-amber-50 border border-amber-200 text-amber-900 text-[12px] rounded-xl flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">{lang === 'ar' ? 'تنبيه إعدادات الحساب' : 'Configuration Notice'}</p>
+                  <p className="mt-1 leading-relaxed text-amber-800">{errorMsg}</p>
+                </div>
+              </div>
+            )}
+
+            <p className="mt-6 text-center text-[12px] text-[#666]">
+              {lang === 'ar' ? 'بالاستمرار، أنت توافق على شروط الخدمة وسياسة الخصوصية لمنصة فيش.' : 'By continuing, you agree to FYSH Terms of Service and Privacy Policy.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className={isCompact ? 'hidden' : 'min-h-full flex items-center justify-center p-4'}>
       {/* Signal Masterpiece Login Screen */}
-      <div className="relative w-full h-full sm:w-[1464px] sm:h-[949px] sm:max-w-[95vw] sm:max-h-[95vh] rounded-3xl overflow-hidden shadow-2xl bg-[#fefefe] border border-gray-200">
+      <div className="relative rounded-3xl overflow-hidden shadow-2xl bg-[#fefefe] border border-gray-200" style={{ width: 1464 * scale, height: 949 * scale }}>
+        <div className="relative" style={{ width: 1464, height: 949, transform: 'scale(' + scale + ')', transformOrigin: 'top left' }}>
           <button
             onClick={onClose}
             className="absolute top-6 right-6 z-50 text-gray-500 hover:text-black bg-white/80 backdrop-blur-md p-2 rounded-full shadow-md transition-colors"
@@ -399,6 +373,8 @@ export function SignalLoginModal({ isOpen, onClose, lang, isLoggedIn, setIsLogge
             </section>
           </div>
         </div>
+      </div>
+      </div>
       </div>
   );
 }
